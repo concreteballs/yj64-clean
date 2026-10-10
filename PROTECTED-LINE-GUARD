@@ -212,14 +212,14 @@ class YJ64BaseApp(App):
             "message_mode_changed",
             mode=mode,
             note=(
-                "Agent mode is a route marker only; the agent API adapter is not implemented yet."
+                "Agent mode selected; each participant uses its own configured Agent ID."
                 if mode == "agent" else "Text mode selected."
             ),
         )
         self.status.text = (
             "Text mode selected."
             if mode == "text"
-            else "Practical/agent mode marker selected; its API adapter is not implemented yet."
+            else "Agent mode selected; each participant uses its own configured Agent ID."
         )
 
     def _participant_config_status(self, participant_name: str) -> dict[str, str | bool]:
@@ -312,8 +312,7 @@ class YJ64BaseApp(App):
             route_id=route_id,
             on_report=lambda event, **data: self._append_report(
                 "router_" + event,
-                participant=participant_name,
-                **data,
+                **{"participant": participant_name, **data},
             ),
             on_copy=self._copy_to_clipboard,
         ).open()
@@ -364,6 +363,14 @@ class YJ64BaseApp(App):
             message = prompt.text.strip()
             if not message:
                 return
+            if not self.message_distributor.dialogue_enabled:
+                self._append_report(
+                    "participant_request_rejected",
+                    participant=participant_name,
+                    reason="dialogue_stopped",
+                )
+                output.text = "Dialogue is stopped. Resume it before sending new LLM requests."
+                return
             prompt.text = ""
             send.disabled = True
             output.text = "Sending..."
@@ -394,8 +401,7 @@ class YJ64BaseApp(App):
                         message,
                         report=lambda event, **data: self._append_report(
                             "participant_" + event,
-                            participant=participant_name,
-                            **data,
+                            **{"participant": participant_name, **data},
                         ),
                     )
                     response = result["response"]
@@ -486,10 +492,12 @@ class YJ64BaseApp(App):
             size_hint_y=None,
             height=54,
         )
-        send = Button(text="START", size_hint_x=0.5)
-        stop = Button(text="STOP DIALOGUE", size_hint_x=0.5, disabled=True)
-        controls.add_widget(send)
-        controls.add_widget(stop)
+        toggle = Button(
+            text="START GROUP DIALOGUE",
+            size_hint_x=1,
+            background_color=(0.85, 0.2, 0.2, 1),
+        )
+        controls.add_widget(toggle)
         close = Button(text="CLOSE", size_hint_y=None, height=54)
         content.add_widget(output)
         content.add_widget(prompt)
@@ -513,7 +521,9 @@ class YJ64BaseApp(App):
 
         def request_stop(*_args: Any) -> None:
             state["stop_requested"] = True
-            stop.disabled = True
+            self.message_distributor.set_dialogue_enabled(False)
+            toggle.text = "START GROUP DIALOGUE"
+            toggle.background_color = (0.85, 0.2, 0.2, 1)
             self._append_report("group_dialogue_stop_requested")
             append_chat("[STOP REQUESTED] Waiting for the current request to finish.")
 
@@ -523,15 +533,16 @@ class YJ64BaseApp(App):
             ]
             seen_by = {name: 0 for name in participants}
             turn = 0
-            state["running"] = True
-            state["stop_requested"] = False
             self._append_report(
                 "group_dialogue_started",
                 participants=participants,
                 question=question,
             )
 
-            while not state["stop_requested"]:
+            while (
+                not state["stop_requested"]
+                and self.message_distributor.dialogue_enabled
+            ):
                 participant = self.message_distributor.next_participant(participants)
                 status = self._participant_config_status(participant)
                 history: list[dict[str, str]] = []
@@ -560,8 +571,7 @@ class YJ64BaseApp(App):
                         history=history,
                         report=lambda event, **data: self._append_report(
                             "group_dialogue_" + event,
-                            participant=participant,
-                            **data,
+                            **{"participant": participant, **data},
                         ),
                     )
                     response = result["response"]
@@ -595,13 +605,11 @@ class YJ64BaseApp(App):
                     break
                 turn += 1
             state["running"] = False
-            Clock.schedule_once(
-                lambda _dt: (
-                    setattr(send, "disabled", False),
-                    setattr(stop, "disabled", True),
-                ),
-                0,
-            )
+            self.message_distributor.set_dialogue_enabled(False)
+            def finish_dialogue_ui(_dt: float) -> None:
+                toggle.text = "START GROUP DIALOGUE"
+                toggle.background_color = (0.85, 0.2, 0.2, 1)
+            Clock.schedule_once(finish_dialogue_ui, 0)
             self._append_report(
                 "group_dialogue_stopped",
                 participants=participants,
@@ -610,12 +618,18 @@ class YJ64BaseApp(App):
             )
 
         def start_dialogue(*_args: Any) -> None:
-            question = prompt.text.strip()
-            if not question or state["running"]:
+            if state["running"]:
+                request_stop()
                 return
+            question = prompt.text.strip()
+            if not question:
+                return
+            self.message_distributor.set_dialogue_enabled(True)
+            state["running"] = True
+            state["stop_requested"] = False
             prompt.text = ""
-            send.disabled = True
-            stop.disabled = False
+            toggle.text = "STOP GROUP DIALOGUE"
+            toggle.background_color = (0.2, 0.7, 0.3, 1)
             output.text = "Group dialogue started.\n"
             from threading import Thread
             Thread(
@@ -625,8 +639,7 @@ class YJ64BaseApp(App):
                 daemon=True,
             ).start()
 
-        send.bind(on_release=start_dialogue)
-        stop.bind(on_release=request_stop)
+        toggle.bind(on_release=start_dialogue)
         close.bind(on_release=lambda *_: popup.dismiss())
         popup.open()
 
@@ -838,6 +851,14 @@ class YJ64BaseApp(App):
     def _send_llm_chat(self, *_: Any) -> None:
         prompt = self.chat_input.text.strip()
         if not prompt:
+            return
+        if not self.message_distributor.dialogue_enabled:
+            self._append_report(
+                "llm_chat_send_rejected",
+                reason="dialogue_stopped",
+                prompt=prompt,
+            )
+            self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
             return
         self._append_report("llm_chat_send_started", prompt=prompt)
         self.status.text = "Sending chat message to LLM..."
@@ -1126,6 +1147,7 @@ class YJ64BaseApp(App):
 
 
 YJ64BaseApp().run()
+
 END ALLOWED
 
 ============================================================
@@ -1264,6 +1286,7 @@ def _load_router_data(user_data_dir: str | Path) -> dict[str, Any]:
                 "model": str(legacy.get("model") or ""),
                 "api_key": str(legacy.get("api_key") or ""),
                 "endpoint": str(legacy.get("endpoint") or ""),
+                "agent_id": str(legacy.get("agent_id") or ""),
             }
             migrated_paths.append(legacy_path)
 
@@ -1282,6 +1305,7 @@ def _load_router_data(user_data_dir: str | Path) -> dict[str, Any]:
                 "model": str(raw.get("model") or ""),
                 "api_key": str(raw.get("api_key") or ""),
                 "endpoint": str(raw.get("endpoint") or ""),
+                "agent_id": str(raw.get("agent_id") or ""),
             }
             next_index += 1
         if routes:
@@ -1315,6 +1339,7 @@ def list_routes(user_data_dir: str | Path) -> list[dict[str, str]]:
                 "provider": config.get("provider", ""),
                 "model": config.get("model", ""),
                 "endpoint": config.get("endpoint", ""),
+                "agent_id": config.get("agent_id", ""),
             })
     return sorted(result, key=lambda item: item["route_id"])
 
@@ -1335,6 +1360,7 @@ def load_config(
         "model": str(raw.get("model") or ""),
         "api_key": str(raw.get("api_key") or ""),
         "endpoint": str(raw.get("endpoint") or ""),
+        "agent_id": str(raw.get("agent_id") or ""),
     }
 
 
@@ -1367,6 +1393,7 @@ def save_config(
         "model": str(config.get("model") or "").strip(),
         "api_key": str(config.get("api_key") or "").strip(),
         "endpoint": str(config.get("endpoint") or "").strip(),
+        "agent_id": str(config.get("agent_id") or "").strip(),
     }
     _write_router_data(user_data_dir, data)
 
@@ -1458,6 +1485,31 @@ def _extract_gemini_text(data: dict[str, Any]) -> str:
     return "".join(texts).strip()
 
 
+def _extract_agent_text(data: dict[str, Any]) -> str:
+    """Extract assistant text from a Mistral Conversations API response."""
+    outputs = data.get("outputs", [])
+    texts: list[str] = []
+    if isinstance(outputs, list):
+        for item in outputs:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content", "")
+            if isinstance(content, str):
+                if content.strip():
+                    texts.append(content.strip())
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        value = part.get("text")
+                        if value is not None and str(value).strip():
+                            texts.append(str(value).strip())
+            elif isinstance(content, dict):
+                value = content.get("text")
+                if value is not None and str(value).strip():
+                    texts.append(str(value).strip())
+    return "\\n".join(texts).strip()
+
+
 def _extract_openai_text(data: dict[str, Any]) -> str:
     output_text = data.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -1502,33 +1554,66 @@ def generate_response(
         operation_id=operation, route_id=selected_route, mode=selected_mode,
         prompt=prompt,
     )
-    if selected_mode != "text":
+    if selected_mode not in {"text", "agent"}:
         _report(
             report, "gateway_mode_rejected",
             operation_id=operation, route_id=selected_route, mode=selected_mode,
-            reason="Only text mode is implemented in this build",
+            reason="Supported modes are text and agent",
         )
-        raise RuntimeError(f"Request mode '{selected_mode}' is not implemented yet")
+        raise RuntimeError(f"Request mode '{selected_mode}' is not supported")
 
     config = load_config(user_data_dir, route_id=selected_route)
     provider = config["provider"].strip().lower()
     model = config["model"].strip()
     key = config["api_key"].strip()
-    if not provider or not key or not model:
+    agent_id = config.get("agent_id", "").strip()
+    mode_configured = bool(
+        provider and key and (
+            (selected_mode == "text" and model)
+            or (selected_mode == "agent" and agent_id)
+        )
+    )
+    if not mode_configured:
         _report(
             report, "gateway_config_missing",
             operation_id=operation, route_id=selected_route,
-            provider=provider, model=model,
-            configured=bool(provider and key and model),
+            provider=provider, model=model, agent_id_configured=bool(agent_id),
+            configured=False, mode=selected_mode,
         )
-        raise RuntimeError(f"Router cell {selected_route} is not fully configured")
+        if selected_mode == "agent" and not agent_id:
+            raise RuntimeError(
+                f"Router cell {selected_route} has no Agent ID configured"
+            )
+        raise RuntimeError(
+            f"Router cell {selected_route} is not fully configured for {selected_mode} mode"
+        )
     _report(
         report, "gateway_config_loaded",
         operation_id=operation, route_id=selected_route,
         provider=provider, model=model, configured=True,
     )
 
-    if provider in {"gemini", "google", "google-gemini"}:
+    if selected_mode == "agent":
+        base = (config["endpoint"] or PROVIDER_DEFAULTS.get(provider, "")).rstrip("/")
+        if not base:
+            raise RuntimeError(
+                f"Router cell {selected_route} requires an API endpoint for Agent mode"
+            )
+        for suffix in ("/chat/completions", "/responses", "/conversations"):
+            if base.endswith(suffix):
+                base = base[:-len(suffix)]
+                break
+        if not base.endswith("/v1"):
+            base += "/v1"
+        url = base + "/conversations"
+        payload = {
+            "agent_id": agent_id,
+            "agent_version": 0,
+            "inputs": history or [{"role": "user", "content": prompt}],
+        }
+        headers = {"Authorization": f"Bearer {key}"}
+        api_method = "conversations"
+    elif provider in {"gemini", "google", "google-gemini"}:
         base = (config["endpoint"] or PROVIDER_DEFAULTS["gemini"]).rstrip("/")
         url = f"{base}/models/{model}:generateContent"
         payload = {"contents": _gemini_contents(prompt, history)}
@@ -1587,9 +1672,13 @@ def generate_response(
     )
 
     response_text = (
-        _extract_gemini_text(data)
-        if provider in {"gemini", "google", "google-gemini"}
-        else _extract_openai_text(data)
+        _extract_agent_text(data)
+        if selected_mode == "agent"
+        else (
+            _extract_gemini_text(data)
+            if provider in {"gemini", "google", "google-gemini"}
+            else _extract_openai_text(data)
+        )
     )
     if not response_text:
         _report(
@@ -1681,15 +1770,17 @@ def test_all_routes(
         route_id = item["route_id"]
         provider = item["provider"]
         model = item["model"]
+        mode = "agent" if item.get("agent_id", "").strip() else "text"
         _report(
             report, "router_all_test_route_started",
             route_id=route_id, provider=provider, model=model,
+            mode=mode, agent_id_configured=bool(item.get("agent_id", "").strip()),
             prompt=prompt,
         )
         try:
             result = generate_response(
                 user_data_dir, prompt, report=report,
-                route_id=route_id, mode="text",
+                route_id=route_id, mode=mode,
             )
             status = "PASS"
             detail = result["response"]
@@ -1698,13 +1789,13 @@ def test_all_routes(
             detail = f"{type(exc).__name__}: {exc}"
             _report(
                 report, "router_all_test_route_failed",
-                route_id=route_id, provider=provider, model=model,
+                route_id=route_id, provider=provider, model=model, mode=mode,
                 error_type=type(exc).__name__, error=str(exc),
             )
         else:
             _report(
                 report, "router_all_test_route_completed",
-                route_id=route_id, provider=provider, model=model,
+                route_id=route_id, provider=provider, model=model, mode=mode,
                 response=result["response"],
             )
         results.append({
@@ -1718,6 +1809,7 @@ def test_all_routes(
     passed = sum(1 for item in results if item["status"] == "PASS")
     report_lines.extend(["", f"Summary: {passed}/{len(results)} connections passed"])
     return {"results": results, "report": "\n".join(report_lines)}
+
 END ALLOWED
 
 
@@ -1857,6 +1949,16 @@ class LLMSettingsPopup(Popup):
         self.content_box.add_widget(Label(text="API key (stored by the central router)", size_hint_y=None, height=dp(22)))
         self.content_box.add_widget(self.api_key)
 
+        self.agent_id = TextInput(
+            hint_text="Agent ID (optional; for AGENT mode)",
+            multiline=False, size_hint_y=None, height=dp(42),
+        )
+        self.content_box.add_widget(Label(
+            text="Agent ID (used when REQUEST MODE is AGENT)",
+            size_hint_y=None, height=dp(22),
+        ))
+        self.content_box.add_widget(self.agent_id)
+
         self.status = Label(
             text="Choose a router cell, enter its connection details, then SAVE.",
             size_hint_y=None, height=dp(56), halign="left", valign="middle",
@@ -1936,6 +2038,7 @@ class LLMSettingsPopup(Popup):
         self.model_picker.text = config.get("model", "") or "Load or select model"
         self.endpoint.text = config.get("endpoint", "")
         self.api_key.text = config.get("api_key", "")
+        self.agent_id.text = config.get("agent_id", "")
         self._loading = False
         self._report("router_cell_loaded", route_id=self.route_id,
                      provider=config.get("provider", ""), model=config.get("model", ""),
@@ -2018,6 +2121,7 @@ class LLMSettingsPopup(Popup):
                 "model": self.model.text.strip(),
                 "endpoint": self.endpoint.text.strip(),
                 "api_key": self.api_key.text.strip(),
+                "agent_id": self.agent_id.text.strip(),
             },
             route_id=self.route_id,
         )
@@ -2074,6 +2178,7 @@ class LLMSettingsPopup(Popup):
             Clock.schedule_once(finish, 0)
 
         Thread(target=worker, name="yj64-router-test-all", daemon=True).start()
+
 END ALLOWED
 
 
@@ -2090,6 +2195,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 
 PARTICIPANT_ROUTES = {
@@ -2100,6 +2206,10 @@ PARTICIPANT_ROUTES = {
 }
 
 
+class DialogueStoppedError(RuntimeError):
+    """Raised when a new LLM request is attempted while dialogue is stopped."""
+
+
 class MessageDistributor:
     """Tracks dialogue order, current mode marker, and optional private target."""
 
@@ -2107,6 +2217,22 @@ class MessageDistributor:
         self.mode = "text"
         self._next_index = 0
         self._private_participant: str | None = None
+        self._dialogue_lock = Lock()
+        self._dialogue_enabled = True
+
+    @property
+    def dialogue_enabled(self) -> bool:
+        with self._dialogue_lock:
+            return self._dialogue_enabled
+
+    @dialogue_enabled.setter
+    def dialogue_enabled(self, enabled: bool) -> None:
+        with self._dialogue_lock:
+            self._dialogue_enabled = bool(enabled)
+
+    def set_dialogue_enabled(self, enabled: bool) -> bool:
+        self.dialogue_enabled = enabled
+        return self.dialogue_enabled
 
     def route_for_participant(self, participant_name: str) -> str:
         try:
@@ -2152,6 +2278,10 @@ class MessageDistributor:
         report: Callable[..., None] | None = None,
         history: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
+        if not self.dialogue_enabled:
+            raise DialogueStoppedError(
+                "Dialogue is stopped; new LLM requests are blocked"
+            )
         route_id = self.route_for_participant(participant_name)
         operation_id = uuid.uuid4().hex
         selected_mode = self.mode
@@ -2187,6 +2317,7 @@ class MessageDistributor:
                 response_length=len(result.get("response", "")),
             )
         return result
+
 END ALLOWED
 
 🟡 ИЗМЕНЕНИЕ: GUARD VERIFIER — блокировка Build при несовпадении.
@@ -2259,11 +2390,11 @@ if __name__ == "__main__":
 
 END ALLOWED
 ============================================================ КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
-EXPECTED-GIT-BLOB-SHA:main.py=39e29c8f3a2f65117516c26294fa8d92e094993b
-EXPECTED-GIT-BLOB-SHA:llm_api.py=437a2e2ca97b34e1328241fb6bda5dd57223343f
-EXPECTED-GIT-BLOB-SHA:llm_settings.py=38c1763a37a1c85216a898122c2ec5dbf924cceb
+EXPECTED-GIT-BLOB-SHA:main.py=cc3b126b3a48f0a5d95c3c58105d436f8cb73f32
+EXPECTED-GIT-BLOB-SHA:llm_api.py=990e83aebcdfdc6d2e9e720cde1f78586fa00383
+EXPECTED-GIT-BLOB-SHA:llm_settings.py=87ade5d3208f813f188ba3f19a6581b55de2ea98
 EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=3ba31910e912241cab181efc57b71cd929262e03
 EXPECTED-GIT-BLOB-SHA:tools/verify_guard.py=887269e44f5fbffc093de87d02e7bf960f3e138b
-EXPECTED-GIT-BLOB-SHA:message_distributor.py=4aa8c297edea27a37b20a178d5a932be4db5e626
-EXPECTED-GIT-BLOB-SHA:.github/workflows/ci.yml=f000bfc794af06b041a4c5cd6d18651489068f83
-EXPECTED-GIT-BLOB-SHA:.github/workflows/android-apk.yml=b58ef86c980e9da08bb67fffb6248c9d2f918b09
+EXPECTED-GIT-BLOB-SHA:message_distributor.py=2bf3283494d624406650bf579b721196e645ebeb
+EXPECTED-GIT-BLOB-SHA:.github/workflows/ci.yml=295307267609aea347e7b1ee7c668a5139d96f9c
+EXPECTED-GIT-BLOB-SHA:.github/workflows/android-apk.yml=69a6644b84324115fbac7a823beeda1fc629ecd1

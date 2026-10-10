@@ -189,14 +189,14 @@ class YJ64BaseApp(App):
             "message_mode_changed",
             mode=mode,
             note=(
-                "Agent mode is a route marker only; the agent API adapter is not implemented yet."
+                "Agent mode selected; each participant uses its own configured Agent ID."
                 if mode == "agent" else "Text mode selected."
             ),
         )
         self.status.text = (
             "Text mode selected."
             if mode == "text"
-            else "Practical/agent mode marker selected; its API adapter is not implemented yet."
+            else "Agent mode selected; each participant uses its own configured Agent ID."
         )
 
     def _participant_config_status(self, participant_name: str) -> dict[str, str | bool]:
@@ -289,8 +289,7 @@ class YJ64BaseApp(App):
             route_id=route_id,
             on_report=lambda event, **data: self._append_report(
                 "router_" + event,
-                participant=participant_name,
-                **data,
+                **{"participant": participant_name, **data},
             ),
             on_copy=self._copy_to_clipboard,
         ).open()
@@ -341,6 +340,14 @@ class YJ64BaseApp(App):
             message = prompt.text.strip()
             if not message:
                 return
+            if not self.message_distributor.dialogue_enabled:
+                self._append_report(
+                    "participant_request_rejected",
+                    participant=participant_name,
+                    reason="dialogue_stopped",
+                )
+                output.text = "Dialogue is stopped. Resume it before sending new LLM requests."
+                return
             prompt.text = ""
             send.disabled = True
             output.text = "Sending..."
@@ -371,8 +378,7 @@ class YJ64BaseApp(App):
                         message,
                         report=lambda event, **data: self._append_report(
                             "participant_" + event,
-                            participant=participant_name,
-                            **data,
+                            **{"participant": participant_name, **data},
                         ),
                     )
                     response = result["response"]
@@ -463,10 +469,12 @@ class YJ64BaseApp(App):
             size_hint_y=None,
             height=54,
         )
-        send = Button(text="START", size_hint_x=0.5)
-        stop = Button(text="STOP DIALOGUE", size_hint_x=0.5, disabled=True)
-        controls.add_widget(send)
-        controls.add_widget(stop)
+        toggle = Button(
+            text="START GROUP DIALOGUE",
+            size_hint_x=1,
+            background_color=(0.85, 0.2, 0.2, 1),
+        )
+        controls.add_widget(toggle)
         close = Button(text="CLOSE", size_hint_y=None, height=54)
         content.add_widget(output)
         content.add_widget(prompt)
@@ -490,7 +498,9 @@ class YJ64BaseApp(App):
 
         def request_stop(*_args: Any) -> None:
             state["stop_requested"] = True
-            stop.disabled = True
+            self.message_distributor.set_dialogue_enabled(False)
+            toggle.text = "START GROUP DIALOGUE"
+            toggle.background_color = (0.85, 0.2, 0.2, 1)
             self._append_report("group_dialogue_stop_requested")
             append_chat("[STOP REQUESTED] Waiting for the current request to finish.")
 
@@ -500,15 +510,16 @@ class YJ64BaseApp(App):
             ]
             seen_by = {name: 0 for name in participants}
             turn = 0
-            state["running"] = True
-            state["stop_requested"] = False
             self._append_report(
                 "group_dialogue_started",
                 participants=participants,
                 question=question,
             )
 
-            while not state["stop_requested"]:
+            while (
+                not state["stop_requested"]
+                and self.message_distributor.dialogue_enabled
+            ):
                 participant = self.message_distributor.next_participant(participants)
                 status = self._participant_config_status(participant)
                 history: list[dict[str, str]] = []
@@ -537,8 +548,7 @@ class YJ64BaseApp(App):
                         history=history,
                         report=lambda event, **data: self._append_report(
                             "group_dialogue_" + event,
-                            participant=participant,
-                            **data,
+                            **{"participant": participant, **data},
                         ),
                     )
                     response = result["response"]
@@ -572,13 +582,11 @@ class YJ64BaseApp(App):
                     break
                 turn += 1
             state["running"] = False
-            Clock.schedule_once(
-                lambda _dt: (
-                    setattr(send, "disabled", False),
-                    setattr(stop, "disabled", True),
-                ),
-                0,
-            )
+            self.message_distributor.set_dialogue_enabled(False)
+            def finish_dialogue_ui(_dt: float) -> None:
+                toggle.text = "START GROUP DIALOGUE"
+                toggle.background_color = (0.85, 0.2, 0.2, 1)
+            Clock.schedule_once(finish_dialogue_ui, 0)
             self._append_report(
                 "group_dialogue_stopped",
                 participants=participants,
@@ -587,12 +595,18 @@ class YJ64BaseApp(App):
             )
 
         def start_dialogue(*_args: Any) -> None:
-            question = prompt.text.strip()
-            if not question or state["running"]:
+            if state["running"]:
+                request_stop()
                 return
+            question = prompt.text.strip()
+            if not question:
+                return
+            self.message_distributor.set_dialogue_enabled(True)
+            state["running"] = True
+            state["stop_requested"] = False
             prompt.text = ""
-            send.disabled = True
-            stop.disabled = False
+            toggle.text = "STOP GROUP DIALOGUE"
+            toggle.background_color = (0.2, 0.7, 0.3, 1)
             output.text = "Group dialogue started.\n"
             from threading import Thread
             Thread(
@@ -602,8 +616,7 @@ class YJ64BaseApp(App):
                 daemon=True,
             ).start()
 
-        send.bind(on_release=start_dialogue)
-        stop.bind(on_release=request_stop)
+        toggle.bind(on_release=start_dialogue)
         close.bind(on_release=lambda *_: popup.dismiss())
         popup.open()
 
@@ -815,6 +828,14 @@ class YJ64BaseApp(App):
     def _send_llm_chat(self, *_: Any) -> None:
         prompt = self.chat_input.text.strip()
         if not prompt:
+            return
+        if not self.message_distributor.dialogue_enabled:
+            self._append_report(
+                "llm_chat_send_rejected",
+                reason="dialogue_stopped",
+                prompt=prompt,
+            )
+            self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
             return
         self._append_report("llm_chat_send_started", prompt=prompt)
         self.status.text = "Sending chat message to LLM..."

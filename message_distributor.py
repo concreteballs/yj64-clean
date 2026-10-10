@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 
 PARTICIPANT_ROUTES = {
@@ -17,6 +18,10 @@ PARTICIPANT_ROUTES = {
 }
 
 
+class DialogueStoppedError(RuntimeError):
+    """Raised when a new LLM request is attempted while dialogue is stopped."""
+
+
 class MessageDistributor:
     """Tracks dialogue order, current mode marker, and optional private target."""
 
@@ -24,6 +29,22 @@ class MessageDistributor:
         self.mode = "text"
         self._next_index = 0
         self._private_participant: str | None = None
+        self._dialogue_lock = Lock()
+        self._dialogue_enabled = True
+
+    @property
+    def dialogue_enabled(self) -> bool:
+        with self._dialogue_lock:
+            return self._dialogue_enabled
+
+    @dialogue_enabled.setter
+    def dialogue_enabled(self, enabled: bool) -> None:
+        with self._dialogue_lock:
+            self._dialogue_enabled = bool(enabled)
+
+    def set_dialogue_enabled(self, enabled: bool) -> bool:
+        self.dialogue_enabled = enabled
+        return self.dialogue_enabled
 
     def route_for_participant(self, participant_name: str) -> str:
         try:
@@ -69,6 +90,10 @@ class MessageDistributor:
         report: Callable[..., None] | None = None,
         history: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
+        if not self.dialogue_enabled:
+            raise DialogueStoppedError(
+                "Dialogue is stopped; new LLM requests are blocked"
+            )
         route_id = self.route_for_participant(participant_name)
         operation_id = uuid.uuid4().hex
         selected_mode = self.mode
