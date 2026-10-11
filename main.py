@@ -805,8 +805,8 @@ class YJ64BaseApp(App):
                 )
             except Exception as exc:
                 report = (
-                    "YJ-64 LLM GENERATION TEST — ALL CONFIGURED PARTICIPANTS\\n"
-                    "Result: FAILED\\n"
+                    "YJ-64 LLM GENERATION TEST — ALL CONFIGURED PARTICIPANTS\n"
+                    "Result: FAILED\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
                 event = (
