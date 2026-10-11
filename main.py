@@ -802,6 +802,16 @@ class YJ64BaseApp(App):
         from llm_api import load_config
         config = load_config(self.user_data_dir, route_id=route_id)
         mode = "agent" if (config.get("agent_id") or "").strip() else "text"
+        # Keep the following ordinary chat message on the same mode/path as this test.
+        self.message_distributor.set_mode(mode)
+        self.mode_button.text = f"REQUEST MODE: {mode.upper()}"
+        self._append_report(
+            "llm_generation_test_chat_mode_selected",
+            participant=participant,
+            route_id=route_id,
+            mode=mode,
+            reason="match_configured_connection_test",
+        )
         self._append_report(
             "llm_generation_test_started",
             scope="common_chat",
