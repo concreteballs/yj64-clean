@@ -769,47 +769,50 @@ class YJ64BaseApp(App):
         Thread(target=run_test, name="yj64-llm-api-test-all-participants", daemon=True).start()
 
     def _test_llm_generation(self, *_: Any) -> None:
-        self._append_report("llm_generation_test_started")
-        self.status.text = "Testing LLM generation..."
+        self._append_report(
+            "llm_generation_test_started", scope="configured_participants"
+        )
+        self.status.text = "Testing generation for all configured participants..."
 
         def run_test() -> None:
-            chat_text = ""
             try:
-                from llm_api import generate_test_response
-                result = generate_test_response(
+                from llm_api import test_all_routes
+                result = test_all_routes(
                     self.user_data_dir,
+                    include_owner=False,
                     report=lambda event, **data: self._append_report(
                         "llm_generation_" + event, **data
                     ),
                 )
-                chat_text = result["response"]
-                report = (
-                    "YJ-64 LLM GENERATION TEST\n"
-                    f"Provider: {result['provider']}\n"
-                    f"Model: {result['model']}\n"
-                    f"Prompt: {result['prompt']}\n"
-                    "Result: SUCCESS\n"
-                    f"Response: {result['response']}"
+                report = result["report"].replace(
+                    "YJ-64 LLM API TEST — ALL CONFIGURED PARTICIPANTS",
+                    "YJ-64 LLM GENERATION TEST — ALL CONFIGURED PARTICIPANTS",
+                )
+                passed = sum(
+                    1 for item in result["results"] if item["status"] == "PASS"
                 )
                 event = (
-                    "llm_generation_test_succeeded",
+                    "llm_generation_test_completed",
                     {
-                        "provider": result["provider"],
-                        "model": result["model"],
-                        "prompt": result["prompt"],
-                        "response": result["response"],
+                        "scope": "configured_participants",
+                        "tested_count": len(result["results"]),
+                        "passed": passed,
+                        "failed": len(result["results"]) - passed,
+                        "route_ids": [
+                            item["route_id"] for item in result["results"]
+                        ],
                     },
                 )
             except Exception as exc:
                 report = (
-                    "YJ-64 LLM GENERATION TEST\n"
-                    "Result: FAILED\n"
+                    "YJ-64 LLM GENERATION TEST — ALL CONFIGURED PARTICIPANTS\\n"
+                    "Result: FAILED\\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
-                chat_text = report
                 event = (
                     "llm_generation_test_failed",
                     {
+                        "scope": "configured_participants",
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     },
@@ -818,7 +821,7 @@ class YJ64BaseApp(App):
             def finish(*_args: Any) -> None:
                 self._append_report(event[0], **event[1])
                 self._copy_to_clipboard(report)
-                self.chat_output.text = chat_text
+                self.chat_output.text = report
                 self.status.text = report
 
             Clock.schedule_once(finish, 0)
@@ -826,7 +829,7 @@ class YJ64BaseApp(App):
         from threading import Thread
         Thread(
             target=run_test,
-            name="yj64-llm-generation-test",
+            name="yj64-llm-generation-test-all-participants",
             daemon=True,
         ).start()
 
