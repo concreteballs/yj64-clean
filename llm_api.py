@@ -682,4 +682,4 @@ def test_all_routes(
         ])
     passed = sum(1 for item in results if item["status"] == "PASS")
     report_lines.extend(["", f"Summary: {passed}/{len(results)} connections passed"])
-    return {"results": results, "report": "\\n".join(report_lines)}
+    return {"results": results, "report": "\n".join(report_lines)}

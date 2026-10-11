@@ -768,8 +768,8 @@ class YJ64BaseApp(App):
                 )
             except Exception as exc:
                 report = (
-                    "YJ-64 LLM API TEST — ALL PARTICIPANTS\\n"
-                    "Result: FAILED\\n"
+                    "YJ-64 LLM API TEST — ALL PARTICIPANTS\n"
+                    "Result: FAILED\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
                 event = (
@@ -1979,7 +1979,7 @@ def test_all_routes(
         ])
     passed = sum(1 for item in results if item["status"] == "PASS")
     report_lines.extend(["", f"Summary: {passed}/{len(results)} connections passed"])
-    return {"results": results, "report": "\\n".join(report_lines)}
+    return {"results": results, "report": "\n".join(report_lines)}
 
 END ALLOWED
 
@@ -2566,8 +2566,8 @@ if __name__ == "__main__":
 
 END ALLOWED
 ============================================================ КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
-EXPECTED-GIT-BLOB-SHA:main.py=1163c33ce937a0052c33f6b97d914605cf953eb3
-EXPECTED-GIT-BLOB-SHA:llm_api.py=bcdba8c66b6104e5956f0190249e53b258bede81
+EXPECTED-GIT-BLOB-SHA:main.py=530458eb5a40aae021143e8f4e7d4a6cc97d8c9d
+EXPECTED-GIT-BLOB-SHA:llm_api.py=32571fd86a2e7207257c4ce8742d1d9f0755b115
 EXPECTED-GIT-BLOB-SHA:llm_settings.py=22cef481708a66ce544d395d2e655c3b9022da08
 EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=3ba31910e912241cab181efc57b71cd929262e03
 EXPECTED-GIT-BLOB-SHA:tools/verify_guard.py=887269e44f5fbffc093de87d02e7bf960f3e138b
