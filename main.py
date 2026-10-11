@@ -717,42 +717,42 @@ class YJ64BaseApp(App):
             )
 
     def _test_llm_api(self, *_: Any) -> None:
-        self._append_report("llm_api_test_started")
-        self.status.text = "Testing LLM API connection..."
+        self._append_report("llm_api_test_started", scope="configured_participants")
+        self.status.text = "Testing all configured participant connections..."
 
         def run_test() -> None:
             try:
-                from llm_api import test_llm_api
-                result = test_llm_api(
+                from llm_api import test_all_routes
+                result = test_all_routes(
                     self.user_data_dir,
-                    route_id="route_owner",
+                    include_owner=False,
                     report=lambda event, **data: self._append_report(
                         "llm_api_" + event, **data
                     ),
                 )
-                report = (
-                    "YJ-64 LLM API TEST\n"
-                    f"Provider: {result['provider']}\n"
-                    f"Model: {result['model']}\n"
-                    f"Result: {result['result']}"
-                )
+                report = result["report"]
+                passed = sum(1 for item in result["results"] if item["status"] == "PASS")
+                failed = len(result["results"]) - passed
                 event = (
-                    "llm_api_test_succeeded",
+                    "llm_api_test_completed",
                     {
-                        "provider": result["provider"],
-                        "model": result["model"],
-                        "result": result["result"],
+                        "scope": "configured_participants",
+                        "tested_count": len(result["results"]),
+                        "passed": passed,
+                        "failed": failed,
+                        "route_ids": [item["route_id"] for item in result["results"]],
                     },
                 )
             except Exception as exc:
                 report = (
-                    "YJ-64 LLM API TEST\n"
-                    "Result: FAILED\n"
+                    "YJ-64 LLM API TEST — ALL PARTICIPANTS\\n"
+                    "Result: FAILED\\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
                 event = (
                     "llm_api_test_failed",
                     {
+                        "scope": "configured_participants",
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     },
@@ -766,7 +766,7 @@ class YJ64BaseApp(App):
             Clock.schedule_once(finish, 0)
 
         from threading import Thread
-        Thread(target=run_test, name="yj64-llm-api-test", daemon=True).start()
+        Thread(target=run_test, name="yj64-llm-api-test-all-participants", daemon=True).start()
 
     def _test_llm_generation(self, *_: Any) -> None:
         self._append_report("llm_generation_test_started")

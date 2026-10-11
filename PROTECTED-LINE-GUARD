@@ -740,42 +740,42 @@ class YJ64BaseApp(App):
             )
 
     def _test_llm_api(self, *_: Any) -> None:
-        self._append_report("llm_api_test_started")
-        self.status.text = "Testing LLM API connection..."
+        self._append_report("llm_api_test_started", scope="configured_participants")
+        self.status.text = "Testing all configured participant connections..."
 
         def run_test() -> None:
             try:
-                from llm_api import test_llm_api
-                result = test_llm_api(
+                from llm_api import test_all_routes
+                result = test_all_routes(
                     self.user_data_dir,
-                    route_id="route_owner",
+                    include_owner=False,
                     report=lambda event, **data: self._append_report(
                         "llm_api_" + event, **data
                     ),
                 )
-                report = (
-                    "YJ-64 LLM API TEST\n"
-                    f"Provider: {result['provider']}\n"
-                    f"Model: {result['model']}\n"
-                    f"Result: {result['result']}"
-                )
+                report = result["report"]
+                passed = sum(1 for item in result["results"] if item["status"] == "PASS")
+                failed = len(result["results"]) - passed
                 event = (
-                    "llm_api_test_succeeded",
+                    "llm_api_test_completed",
                     {
-                        "provider": result["provider"],
-                        "model": result["model"],
-                        "result": result["result"],
+                        "scope": "configured_participants",
+                        "tested_count": len(result["results"]),
+                        "passed": passed,
+                        "failed": failed,
+                        "route_ids": [item["route_id"] for item in result["results"]],
                     },
                 )
             except Exception as exc:
                 report = (
-                    "YJ-64 LLM API TEST\n"
-                    "Result: FAILED\n"
+                    "YJ-64 LLM API TEST — ALL PARTICIPANTS\\n"
+                    "Result: FAILED\\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
                 event = (
                     "llm_api_test_failed",
                     {
+                        "scope": "configured_participants",
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     },
@@ -789,7 +789,7 @@ class YJ64BaseApp(App):
             Clock.schedule_once(finish, 0)
 
         from threading import Thread
-        Thread(target=run_test, name="yj64-llm-api-test", daemon=True).start()
+        Thread(target=run_test, name="yj64-llm-api-test-all-participants", daemon=True).start()
 
     def _test_llm_generation(self, *_: Any) -> None:
         self._append_report("llm_generation_test_started")
@@ -1914,13 +1914,29 @@ def test_llm_api(
 def test_all_routes(
     user_data_dir: str | Path,
     report: Any = None,
+    include_owner: bool = True,
 ) -> dict[str, Any]:
     prompt = "Reply with exactly: YJ64_OK"
     routes = list_routes(user_data_dir)
+    if not include_owner:
+        routes = [
+            item for item in routes
+            if item["route_id"] in {"route_1", "route_2", "route_3"}
+        ]
     if not routes:
-        raise RuntimeError("No saved router cells are configured")
+        if include_owner:
+            raise RuntimeError("No saved router cells are configured")
+        raise RuntimeError(
+            "No configured participant connections found "
+            "(route_1, route_2, route_3); Owner is not tested"
+        )
     results: list[dict[str, str]] = []
-    report_lines = ["YJ-64 CENTRAL ROUTER — TEST ALL SAVED CONNECTIONS"]
+    title = (
+        "YJ-64 CENTRAL ROUTER — TEST ALL SAVED CONNECTIONS"
+        if include_owner else
+        "YJ-64 LLM API TEST — ALL CONFIGURED PARTICIPANTS"
+    )
+    report_lines = [title]
     for item in routes:
         route_id = item["route_id"]
         provider = item["provider"]
@@ -1963,7 +1979,7 @@ def test_all_routes(
         ])
     passed = sum(1 for item in results if item["status"] == "PASS")
     report_lines.extend(["", f"Summary: {passed}/{len(results)} connections passed"])
-    return {"results": results, "report": "\n".join(report_lines)}
+    return {"results": results, "report": "\\n".join(report_lines)}
 
 END ALLOWED
 
@@ -2550,8 +2566,8 @@ if __name__ == "__main__":
 
 END ALLOWED
 ============================================================ КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
-EXPECTED-GIT-BLOB-SHA:main.py=db9ff3962bbc56c180765f42ad2448271e362913
-EXPECTED-GIT-BLOB-SHA:llm_api.py=47b000944b42c176a34fc3fabc3ff98fa293c2ca
+EXPECTED-GIT-BLOB-SHA:main.py=1163c33ce937a0052c33f6b97d914605cf953eb3
+EXPECTED-GIT-BLOB-SHA:llm_api.py=bcdba8c66b6104e5956f0190249e53b258bede81
 EXPECTED-GIT-BLOB-SHA:llm_settings.py=22cef481708a66ce544d395d2e655c3b9022da08
 EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=3ba31910e912241cab181efc57b71cd929262e03
 EXPECTED-GIT-BLOB-SHA:tools/verify_guard.py=887269e44f5fbffc093de87d02e7bf960f3e138b

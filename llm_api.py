@@ -617,13 +617,29 @@ def test_llm_api(
 def test_all_routes(
     user_data_dir: str | Path,
     report: Any = None,
+    include_owner: bool = True,
 ) -> dict[str, Any]:
     prompt = "Reply with exactly: YJ64_OK"
     routes = list_routes(user_data_dir)
+    if not include_owner:
+        routes = [
+            item for item in routes
+            if item["route_id"] in {"route_1", "route_2", "route_3"}
+        ]
     if not routes:
-        raise RuntimeError("No saved router cells are configured")
+        if include_owner:
+            raise RuntimeError("No saved router cells are configured")
+        raise RuntimeError(
+            "No configured participant connections found "
+            "(route_1, route_2, route_3); Owner is not tested"
+        )
     results: list[dict[str, str]] = []
-    report_lines = ["YJ-64 CENTRAL ROUTER — TEST ALL SAVED CONNECTIONS"]
+    title = (
+        "YJ-64 CENTRAL ROUTER — TEST ALL SAVED CONNECTIONS"
+        if include_owner else
+        "YJ-64 LLM API TEST — ALL CONFIGURED PARTICIPANTS"
+    )
+    report_lines = [title]
     for item in routes:
         route_id = item["route_id"]
         provider = item["provider"]
@@ -666,4 +682,4 @@ def test_all_routes(
         ])
     passed = sum(1 for item in results if item["status"] == "PASS")
     report_lines.extend(["", f"Summary: {passed}/{len(results)} connections passed"])
-    return {"results": results, "report": "\n".join(report_lines)}
+    return {"results": results, "report": "\\n".join(report_lines)}
