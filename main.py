@@ -128,6 +128,14 @@ class YJ64BaseApp(App):
         chat_row.add_widget(chat_send)
         root.add_widget(chat_row)
 
+        chat_test_button = Button(
+            text="TEST CHAT ROUTE (YJ64_OK)",
+            size_hint_y=None,
+            height=48,
+        )
+        chat_test_button.bind(on_release=self._test_llm_chat_route)
+        root.add_widget(chat_test_button)
+
         participant_column = BoxLayout(
             orientation="vertical",
             spacing=8,
@@ -825,6 +833,131 @@ class YJ64BaseApp(App):
     def _chat_input_focus_changed(self, _instance: Any, focused: bool) -> None:
         self._append_report("llm_chat_input_focus_changed", focused=focused)
 
+    def _chat_target_details(self) -> dict[str, Any]:
+        from llm_api import route_config_exists
+
+        connected = [
+            name for name in ("Participant 1", "Participant 2", "Participant 3")
+            if self._participant_config_status(name)["configured"]
+        ]
+        owner_connected = route_config_exists(self.user_data_dir, "route_owner")
+        preferred = self.message_distributor.active_participant
+        if preferred and self._participant_config_status(preferred)["configured"]:
+            participant = preferred
+            reason = "preferred_configured_participant"
+        elif connected:
+            participant = connected[0]
+            reason = "first_configured_participant"
+        else:
+            participant = "Owner"
+            reason = "owner_fallback"
+        return {
+            "participant": participant,
+            "route_id": self.message_distributor.route_for_participant(participant),
+            "connected_participants": connected,
+            "owner_connected": owner_connected,
+            "preferred": preferred,
+            "reason": reason,
+        }
+
+    def _test_llm_chat_route(self, *_: Any) -> None:
+        prompt = "Reply with exactly: YJ64_OK"
+        if not self.message_distributor.dialogue_enabled:
+            self._append_report(
+                "llm_chat_route_test_rejected",
+                reason="dialogue_stopped",
+                prompt=prompt,
+            )
+            self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
+            return
+
+        target = self._chat_target_details()
+        participant = target["participant"]
+        route_id = target["route_id"]
+        mode = self.message_distributor.mode
+        self._append_report(
+            "llm_chat_route_test_started",
+            prompt=prompt,
+            participant=participant,
+            route_id=route_id,
+            mode=mode,
+            connected_participants=target["connected_participants"],
+            owner_connected=target["owner_connected"],
+            preferred=target["preferred"],
+            reason=target["reason"],
+        )
+        self.status.text = f"Testing common-chat route: {participant} / {route_id} / {mode}..."
+
+        def run_test() -> None:
+            try:
+                result = self.message_distributor.dispatch_message(
+                    self.user_data_dir,
+                    participant,
+                    prompt,
+                    report=lambda event, **data: self._append_report(
+                        "llm_chat_route_test_" + event, **data
+                    ),
+                )
+                report_text = (
+                    "YJ-64 COMMON CHAT ROUTE TEST\n"
+                    f"Participant: {participant}\n"
+                    f"Route: {route_id}\n"
+                    f"Mode: {mode}\n"
+                    f"Provider: {result['provider']}\n"
+                    f"Model: {result['model']}\n"
+                    f"Prompt: {prompt}\n"
+                    "Result: SUCCESS\n"
+                    f"Response: {result['response']}"
+                )
+                event = (
+                    "llm_chat_route_test_succeeded",
+                    {
+                        "participant": participant,
+                        "route_id": route_id,
+                        "mode": mode,
+                        "provider": result["provider"],
+                        "model": result["model"],
+                        "prompt": prompt,
+                        "response": result["response"],
+                    },
+                )
+            except Exception as exc:
+                report_text = (
+                    "YJ-64 COMMON CHAT ROUTE TEST\n"
+                    f"Participant: {participant}\n"
+                    f"Route: {route_id}\n"
+                    f"Mode: {mode}\n"
+                    f"Prompt: {prompt}\n"
+                    "Result: FAILED\n"
+                    f"Error: {type(exc).__name__}: {exc}"
+                )
+                event = (
+                    "llm_chat_route_test_failed",
+                    {
+                        "participant": participant,
+                        "route_id": route_id,
+                        "mode": mode,
+                        "prompt": prompt,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+
+            def finish(*_args: Any) -> None:
+                self._append_report(event[0], **event[1])
+                self._copy_to_clipboard(report_text)
+                self.chat_output.text = report_text
+                self.status.text = report_text
+
+            Clock.schedule_once(finish, 0)
+
+        from threading import Thread
+        Thread(
+            target=run_test,
+            name="yj64-common-chat-route-test",
+            daemon=True,
+        ).start()
+
     def _send_llm_chat(self, *_: Any) -> None:
         prompt = self.chat_input.text.strip()
         if not prompt:
@@ -837,20 +970,29 @@ class YJ64BaseApp(App):
             )
             self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
             return
-        self._append_report("llm_chat_send_started", prompt=prompt)
+        target = self._chat_target_details()
+        participant = target["participant"]
+        self._append_report(
+            "llm_chat_participant_selected",
+            participant=participant,
+            route_id=target["route_id"],
+            connected_participants=target["connected_participants"],
+            owner_connected=target["owner_connected"],
+            preferred=target["preferred"],
+            reason=target["reason"],
+        )
+        self._append_report(
+            "llm_chat_send_started",
+            prompt=prompt,
+            participant=participant,
+            route_id=target["route_id"],
+            mode=self.message_distributor.mode,
+        )
         self.status.text = "Sending chat message to LLM..."
         self.chat_input.text = ""
 
         def run_chat() -> None:
             try:
-                configured_participants = [
-                    name for name in ("Participant 1", "Participant 2", "Participant 3")
-                    if self._participant_config_status(name)["configured"]
-                ]
-                participant = (
-                    self.message_distributor.active_participant
-                    or (configured_participants[0] if configured_participants else "Owner")
-                )
                 result = self.message_distributor.dispatch_message(
                     self.user_data_dir,
                     participant,
@@ -859,13 +1001,13 @@ class YJ64BaseApp(App):
                         "llm_chat_" + event, **data
                     ),
                 )
-                report = (
-                    f"Owner: {prompt}\n"
-                    f"{participant}: {result['response']}"
-                )
+                report_text = f"Owner: {prompt}\n{participant}: {result['response']}"
                 event = (
                     "llm_chat_send_succeeded",
                     {
+                        "participant": participant,
+                        "route_id": result.get("route_id", target["route_id"]),
+                        "mode": self.message_distributor.mode,
                         "provider": result["provider"],
                         "model": result["model"],
                         "prompt": prompt,
@@ -873,14 +1015,18 @@ class YJ64BaseApp(App):
                     },
                 )
             except Exception as exc:
-                report = (
+                report_text = (
                     f"User: {prompt}\n"
+                    f"Participant: {participant}\n"
                     "Result: FAILED\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
                 event = (
                     "llm_chat_send_failed",
                     {
+                        "participant": participant,
+                        "route_id": target["route_id"],
+                        "mode": self.message_distributor.mode,
                         "prompt": prompt,
                         "error_type": type(exc).__name__,
                         "error": str(exc),
@@ -889,17 +1035,13 @@ class YJ64BaseApp(App):
 
             def finish(*_args: Any) -> None:
                 self._append_report(event[0], **event[1])
-                self.chat_output.text += f"\n\n{report}"
-                self.status.text = report
+                self.chat_output.text += f"\n\n{report_text}"
+                self.status.text = report_text
 
             Clock.schedule_once(finish, 0)
 
         from threading import Thread
-        Thread(
-            target=run_chat,
-            name="yj64-llm-chat",
-            daemon=True,
-        ).start()
+        Thread(target=run_chat, name="yj64-llm-chat", daemon=True).start()
 
     def _copy_to_clipboard(self, text: str) -> None:
         try:

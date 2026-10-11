@@ -32,7 +32,7 @@ ROUTE_LABELS = {
     "route_3": "Participant 3 / route_3",
 }
 LABEL_ROUTES = {label: route for route, label in ROUTE_LABELS.items()}
-PROVIDERS = ("openai", "gemini", "groq", "openrouter", "custom")
+PROVIDERS = ("openai", "gemini", "groq", "openrouter", "mistral ai", "custom")
 
 
 class LLMSettingsPopup(Popup):
@@ -244,6 +244,8 @@ class LLMSettingsPopup(Popup):
             "gemini": "https://generativelanguage.googleapis.com/v1beta",
             "groq": "https://api.groq.com/openai/v1",
             "openrouter": "https://openrouter.ai/api/v1",
+            "mistral ai": "https://api.mistral.ai/v1",
+            "mistral": "https://api.mistral.ai/v1",
         }
         self.endpoint.text = defaults.get(self._provider_id(), "")
         self.model_picker.values = ()
@@ -313,13 +315,16 @@ class LLMSettingsPopup(Popup):
 
     def _test_one(self, *_: Any) -> None:
         self._save()
-        self.status.text = f"Testing text generation through {self.route_id}..."
+        from llm_api import load_config
+        config = load_config(self.user_data_dir, route_id=self.route_id)
+        mode = "agent" if config.get("agent_id", "").strip() else "text"
+        self.status.text = f"Testing {mode} generation through {self.route_id}..."
 
         def worker() -> None:
-            lines = [f"YJ-64 ROUTER TEST — {self.route_id}"]
+            lines = [f"YJ-64 ROUTER TEST — {self.route_id}", f"Mode: {mode}"]
             try:
                 result = generate_test_response(
-                    self.user_data_dir, route_id=self.route_id,
+                    self.user_data_dir, route_id=self.route_id, mode=mode,
                     report=lambda event, **data: self._report(event, **data),
                 )
                 lines.extend([

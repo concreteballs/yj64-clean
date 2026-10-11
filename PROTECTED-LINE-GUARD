@@ -151,6 +151,14 @@ class YJ64BaseApp(App):
         chat_row.add_widget(chat_send)
         root.add_widget(chat_row)
 
+        chat_test_button = Button(
+            text="TEST CHAT ROUTE (YJ64_OK)",
+            size_hint_y=None,
+            height=48,
+        )
+        chat_test_button.bind(on_release=self._test_llm_chat_route)
+        root.add_widget(chat_test_button)
+
         participant_column = BoxLayout(
             orientation="vertical",
             spacing=8,
@@ -848,6 +856,131 @@ class YJ64BaseApp(App):
     def _chat_input_focus_changed(self, _instance: Any, focused: bool) -> None:
         self._append_report("llm_chat_input_focus_changed", focused=focused)
 
+    def _chat_target_details(self) -> dict[str, Any]:
+        from llm_api import route_config_exists
+
+        connected = [
+            name for name in ("Participant 1", "Participant 2", "Participant 3")
+            if self._participant_config_status(name)["configured"]
+        ]
+        owner_connected = route_config_exists(self.user_data_dir, "route_owner")
+        preferred = self.message_distributor.active_participant
+        if preferred and self._participant_config_status(preferred)["configured"]:
+            participant = preferred
+            reason = "preferred_configured_participant"
+        elif connected:
+            participant = connected[0]
+            reason = "first_configured_participant"
+        else:
+            participant = "Owner"
+            reason = "owner_fallback"
+        return {
+            "participant": participant,
+            "route_id": self.message_distributor.route_for_participant(participant),
+            "connected_participants": connected,
+            "owner_connected": owner_connected,
+            "preferred": preferred,
+            "reason": reason,
+        }
+
+    def _test_llm_chat_route(self, *_: Any) -> None:
+        prompt = "Reply with exactly: YJ64_OK"
+        if not self.message_distributor.dialogue_enabled:
+            self._append_report(
+                "llm_chat_route_test_rejected",
+                reason="dialogue_stopped",
+                prompt=prompt,
+            )
+            self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
+            return
+
+        target = self._chat_target_details()
+        participant = target["participant"]
+        route_id = target["route_id"]
+        mode = self.message_distributor.mode
+        self._append_report(
+            "llm_chat_route_test_started",
+            prompt=prompt,
+            participant=participant,
+            route_id=route_id,
+            mode=mode,
+            connected_participants=target["connected_participants"],
+            owner_connected=target["owner_connected"],
+            preferred=target["preferred"],
+            reason=target["reason"],
+        )
+        self.status.text = f"Testing common-chat route: {participant} / {route_id} / {mode}..."
+
+        def run_test() -> None:
+            try:
+                result = self.message_distributor.dispatch_message(
+                    self.user_data_dir,
+                    participant,
+                    prompt,
+                    report=lambda event, **data: self._append_report(
+                        "llm_chat_route_test_" + event, **data
+                    ),
+                )
+                report_text = (
+                    "YJ-64 COMMON CHAT ROUTE TEST\n"
+                    f"Participant: {participant}\n"
+                    f"Route: {route_id}\n"
+                    f"Mode: {mode}\n"
+                    f"Provider: {result['provider']}\n"
+                    f"Model: {result['model']}\n"
+                    f"Prompt: {prompt}\n"
+                    "Result: SUCCESS\n"
+                    f"Response: {result['response']}"
+                )
+                event = (
+                    "llm_chat_route_test_succeeded",
+                    {
+                        "participant": participant,
+                        "route_id": route_id,
+                        "mode": mode,
+                        "provider": result["provider"],
+                        "model": result["model"],
+                        "prompt": prompt,
+                        "response": result["response"],
+                    },
+                )
+            except Exception as exc:
+                report_text = (
+                    "YJ-64 COMMON CHAT ROUTE TEST\n"
+                    f"Participant: {participant}\n"
+                    f"Route: {route_id}\n"
+                    f"Mode: {mode}\n"
+                    f"Prompt: {prompt}\n"
+                    "Result: FAILED\n"
+                    f"Error: {type(exc).__name__}: {exc}"
+                )
+                event = (
+                    "llm_chat_route_test_failed",
+                    {
+                        "participant": participant,
+                        "route_id": route_id,
+                        "mode": mode,
+                        "prompt": prompt,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+
+            def finish(*_args: Any) -> None:
+                self._append_report(event[0], **event[1])
+                self._copy_to_clipboard(report_text)
+                self.chat_output.text = report_text
+                self.status.text = report_text
+
+            Clock.schedule_once(finish, 0)
+
+        from threading import Thread
+        Thread(
+            target=run_test,
+            name="yj64-common-chat-route-test",
+            daemon=True,
+        ).start()
+
     def _send_llm_chat(self, *_: Any) -> None:
         prompt = self.chat_input.text.strip()
         if not prompt:
@@ -860,20 +993,29 @@ class YJ64BaseApp(App):
             )
             self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
             return
-        self._append_report("llm_chat_send_started", prompt=prompt)
+        target = self._chat_target_details()
+        participant = target["participant"]
+        self._append_report(
+            "llm_chat_participant_selected",
+            participant=participant,
+            route_id=target["route_id"],
+            connected_participants=target["connected_participants"],
+            owner_connected=target["owner_connected"],
+            preferred=target["preferred"],
+            reason=target["reason"],
+        )
+        self._append_report(
+            "llm_chat_send_started",
+            prompt=prompt,
+            participant=participant,
+            route_id=target["route_id"],
+            mode=self.message_distributor.mode,
+        )
         self.status.text = "Sending chat message to LLM..."
         self.chat_input.text = ""
 
         def run_chat() -> None:
             try:
-                configured_participants = [
-                    name for name in ("Participant 1", "Participant 2", "Participant 3")
-                    if self._participant_config_status(name)["configured"]
-                ]
-                participant = (
-                    self.message_distributor.active_participant
-                    or (configured_participants[0] if configured_participants else "Owner")
-                )
                 result = self.message_distributor.dispatch_message(
                     self.user_data_dir,
                     participant,
@@ -882,13 +1024,13 @@ class YJ64BaseApp(App):
                         "llm_chat_" + event, **data
                     ),
                 )
-                report = (
-                    f"Owner: {prompt}\n"
-                    f"{participant}: {result['response']}"
-                )
+                report_text = f"Owner: {prompt}\n{participant}: {result['response']}"
                 event = (
                     "llm_chat_send_succeeded",
                     {
+                        "participant": participant,
+                        "route_id": result.get("route_id", target["route_id"]),
+                        "mode": self.message_distributor.mode,
                         "provider": result["provider"],
                         "model": result["model"],
                         "prompt": prompt,
@@ -896,14 +1038,18 @@ class YJ64BaseApp(App):
                     },
                 )
             except Exception as exc:
-                report = (
+                report_text = (
                     f"User: {prompt}\n"
+                    f"Participant: {participant}\n"
                     "Result: FAILED\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
                 event = (
                     "llm_chat_send_failed",
                     {
+                        "participant": participant,
+                        "route_id": target["route_id"],
+                        "mode": self.message_distributor.mode,
                         "prompt": prompt,
                         "error_type": type(exc).__name__,
                         "error": str(exc),
@@ -912,17 +1058,13 @@ class YJ64BaseApp(App):
 
             def finish(*_args: Any) -> None:
                 self._append_report(event[0], **event[1])
-                self.chat_output.text += f"\n\n{report}"
-                self.status.text = report
+                self.chat_output.text += f"\n\n{report_text}"
+                self.status.text = report_text
 
             Clock.schedule_once(finish, 0)
 
         from threading import Thread
-        Thread(
-            target=run_chat,
-            name="yj64-llm-chat",
-            daemon=True,
-        ).start()
+        Thread(target=run_chat, name="yj64-llm-chat", daemon=True).start()
 
     def _copy_to_clipboard(self, text: str) -> None:
         try:
@@ -1185,6 +1327,8 @@ PROVIDER_DEFAULTS = {
     "google-gemini": "https://generativelanguage.googleapis.com/v1beta",
     "groq": "https://api.groq.com/openai/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "mistral ai": "https://api.mistral.ai/v1",
 }
 
 
@@ -1507,7 +1651,7 @@ def _extract_agent_text(data: dict[str, Any]) -> str:
                 value = content.get("text")
                 if value is not None and str(value).strip():
                     texts.append(str(value).strip())
-    return "\\n".join(texts).strip()
+    return "\n".join(texts).strip()
 
 
 def _extract_openai_text(data: dict[str, Any]) -> str:
@@ -1664,7 +1808,17 @@ def generate_response(
         operation_id=operation, route_id=selected_route,
         provider=provider, model=model, api_method=api_method,
     )
-    data = _request("POST", url, headers, payload=payload)
+    try:
+        data = _request("POST", url, headers, payload=payload)
+    except Exception as exc:
+        _report(
+            report, "gateway_request_failed",
+            operation_id=operation, route_id=selected_route,
+            provider=provider, model=model, mode=selected_mode,
+            api_method=api_method, endpoint=url,
+            error_type=type(exc).__name__, error=str(exc),
+        )
+        raise
     _report(
         report, "gateway_http_response_received",
         operation_id=operation, route_id=selected_route,
@@ -1711,10 +1865,11 @@ def generate_test_response(
     user_data_dir: str | Path,
     report: Any = None,
     route_id: str = "route_owner",
+    mode: str = "text",
 ) -> dict[str, Any]:
     prompt = "Reply with exactly: YJ64_OK"
     return generate_response(
-        user_data_dir, prompt, report=report, route_id=route_id, mode="text"
+        user_data_dir, prompt, report=report, route_id=route_id, mode=mode
     )
 
 
@@ -1850,7 +2005,7 @@ ROUTE_LABELS = {
     "route_3": "Participant 3 / route_3",
 }
 LABEL_ROUTES = {label: route for route, label in ROUTE_LABELS.items()}
-PROVIDERS = ("openai", "gemini", "groq", "openrouter", "custom")
+PROVIDERS = ("openai", "gemini", "groq", "openrouter", "mistral ai", "custom")
 
 
 class LLMSettingsPopup(Popup):
@@ -2062,6 +2217,8 @@ class LLMSettingsPopup(Popup):
             "gemini": "https://generativelanguage.googleapis.com/v1beta",
             "groq": "https://api.groq.com/openai/v1",
             "openrouter": "https://openrouter.ai/api/v1",
+            "mistral ai": "https://api.mistral.ai/v1",
+            "mistral": "https://api.mistral.ai/v1",
         }
         self.endpoint.text = defaults.get(self._provider_id(), "")
         self.model_picker.values = ()
@@ -2131,13 +2288,16 @@ class LLMSettingsPopup(Popup):
 
     def _test_one(self, *_: Any) -> None:
         self._save()
-        self.status.text = f"Testing text generation through {self.route_id}..."
+        from llm_api import load_config
+        config = load_config(self.user_data_dir, route_id=self.route_id)
+        mode = "agent" if config.get("agent_id", "").strip() else "text"
+        self.status.text = f"Testing {mode} generation through {self.route_id}..."
 
         def worker() -> None:
-            lines = [f"YJ-64 ROUTER TEST — {self.route_id}"]
+            lines = [f"YJ-64 ROUTER TEST — {self.route_id}", f"Mode: {mode}"]
             try:
                 result = generate_test_response(
-                    self.user_data_dir, route_id=self.route_id,
+                    self.user_data_dir, route_id=self.route_id, mode=mode,
                     report=lambda event, **data: self._report(event, **data),
                 )
                 lines.extend([
@@ -2390,9 +2550,9 @@ if __name__ == "__main__":
 
 END ALLOWED
 ============================================================ КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
-EXPECTED-GIT-BLOB-SHA:main.py=cc3b126b3a48f0a5d95c3c58105d436f8cb73f32
-EXPECTED-GIT-BLOB-SHA:llm_api.py=990e83aebcdfdc6d2e9e720cde1f78586fa00383
-EXPECTED-GIT-BLOB-SHA:llm_settings.py=87ade5d3208f813f188ba3f19a6581b55de2ea98
+EXPECTED-GIT-BLOB-SHA:main.py=db9ff3962bbc56c180765f42ad2448271e362913
+EXPECTED-GIT-BLOB-SHA:llm_api.py=47b000944b42c176a34fc3fabc3ff98fa293c2ca
+EXPECTED-GIT-BLOB-SHA:llm_settings.py=22cef481708a66ce544d395d2e655c3b9022da08
 EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=3ba31910e912241cab181efc57b71cd929262e03
 EXPECTED-GIT-BLOB-SHA:tools/verify_guard.py=887269e44f5fbffc093de87d02e7bf960f3e138b
 EXPECTED-GIT-BLOB-SHA:message_distributor.py=2bf3283494d624406650bf579b721196e645ebeb
