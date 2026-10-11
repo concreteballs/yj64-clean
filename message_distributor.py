@@ -89,6 +89,7 @@ class MessageDistributor:
         message: str,
         report: Callable[..., None] | None = None,
         history: list[dict[str, str]] | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         if not self.dialogue_enabled:
             raise DialogueStoppedError(
@@ -96,7 +97,9 @@ class MessageDistributor:
             )
         route_id = self.route_for_participant(participant_name)
         operation_id = uuid.uuid4().hex
-        selected_mode = self.mode
+        selected_mode = self.mode if mode is None else str(mode or "text").strip().lower()
+        if selected_mode not in {"text", "agent"}:
+            raise ValueError(f"Unknown message mode marker: {selected_mode}")
         if report is not None:
             report(
                 "distributor_request_marked",

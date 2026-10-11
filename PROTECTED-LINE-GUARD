@@ -792,67 +792,127 @@ class YJ64BaseApp(App):
         Thread(target=run_test, name="yj64-llm-api-test-all-participants", daemon=True).start()
 
     def _test_llm_generation(self, *_: Any) -> None:
+        prompt = "Reply with exactly: YJ64_OK"
+        if not self.message_distributor.dialogue_enabled:
+            self._append_report(
+                "llm_generation_test_rejected",
+                reason="dialogue_stopped",
+                prompt=prompt,
+            )
+            self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
+            return
+
+        target = self._chat_target_details()
+        participant = target["participant"]
+        route_id = target["route_id"]
+        if not target["connected_participants"]:
+            report_text = (
+                "YJ-64 LLM GENERATION TEST — COMMON CHAT\n"
+                "Result: FAILED\n"
+                "Error: No configured participant connection is available."
+            )
+            self._append_report(
+                "llm_generation_test_failed",
+                scope="common_chat",
+                route_id=route_id,
+                error="No configured participant connection is available.",
+            )
+            self._copy_to_clipboard(report_text)
+            self.chat_output.text += f"\n\n{report_text}"
+            self.status.text = report_text
+            return
+
+        from llm_api import load_config
+        config = load_config(self.user_data_dir, route_id=route_id)
+        mode = "agent" if (config.get("agent_id") or "").strip() else "text"
         self._append_report(
-            "llm_generation_test_started", scope="configured_participants"
+            "llm_generation_test_started",
+            scope="common_chat",
+            prompt=prompt,
+            participant=participant,
+            route_id=route_id,
+            mode=mode,
+            connected_participants=target["connected_participants"],
+            reason=target["reason"],
         )
-        self.status.text = "Testing generation for all configured participants..."
+        self.chat_output.text += (
+            f"\n\nUser: {prompt}\nParticipant: {participant}\n"
+            f"Route: {route_id} / {mode}\nTest request sent..."
+        )
+        self.status.text = f"Sending generation test through chat: {participant} / {route_id} / {mode}..."
 
         def run_test() -> None:
             try:
-                from llm_api import test_all_routes
-                result = test_all_routes(
+                result = self.message_distributor.dispatch_message(
                     self.user_data_dir,
-                    include_owner=False,
+                    participant,
+                    prompt,
+                    mode=mode,
                     report=lambda event, **data: self._append_report(
-                        "llm_generation_" + event, **data
+                        "llm_generation_chat_" + event, **data
                     ),
                 )
-                report = result["report"].replace(
-                    "YJ-64 LLM API TEST — ALL CONFIGURED PARTICIPANTS",
-                    "YJ-64 LLM GENERATION TEST — ALL CONFIGURED PARTICIPANTS",
-                )
-                passed = sum(
-                    1 for item in result["results"] if item["status"] == "PASS"
+                report_text = (
+                    "YJ-64 LLM GENERATION TEST — COMMON CHAT\n"
+                    f"Participant: {participant}\n"
+                    f"Route: {route_id}\n"
+                    f"Mode: {mode}\n"
+                    f"Provider: {result['provider']}\n"
+                    f"Model: {result['model']}\n"
+                    f"Prompt: {prompt}\n"
+                    "Result: SUCCESS\n"
+                    f"Response: {result['response']}"
                 )
                 event = (
                     "llm_generation_test_completed",
                     {
-                        "scope": "configured_participants",
-                        "tested_count": len(result["results"]),
-                        "passed": passed,
-                        "failed": len(result["results"]) - passed,
-                        "route_ids": [
-                            item["route_id"] for item in result["results"]
-                        ],
+                        "scope": "common_chat",
+                        "participant": participant,
+                        "route_id": route_id,
+                        "mode": mode,
+                        "provider": result["provider"],
+                        "model": result["model"],
+                        "prompt": prompt,
+                        "response": result["response"],
                     },
                 )
+                chat_result = f"{participant}: {result['response']}"
             except Exception as exc:
-                report = (
-                    "YJ-64 LLM GENERATION TEST — ALL CONFIGURED PARTICIPANTS\n"
+                report_text = (
+                    "YJ-64 LLM GENERATION TEST — COMMON CHAT\n"
+                    f"Participant: {participant}\n"
+                    f"Route: {route_id}\n"
+                    f"Mode: {mode}\n"
+                    f"Prompt: {prompt}\n"
                     "Result: FAILED\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
                 event = (
                     "llm_generation_test_failed",
                     {
-                        "scope": "configured_participants",
+                        "scope": "common_chat",
+                        "participant": participant,
+                        "route_id": route_id,
+                        "mode": mode,
+                        "prompt": prompt,
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     },
                 )
+                chat_result = f"{participant}: FAILED — {type(exc).__name__}: {exc}"
 
             def finish(*_args: Any) -> None:
                 self._append_report(event[0], **event[1])
-                self._copy_to_clipboard(report)
-                self.chat_output.text = report
-                self.status.text = report
+                self._copy_to_clipboard(report_text)
+                self.chat_output.text += f"\n{chat_result}"
+                self.status.text = report_text
 
             Clock.schedule_once(finish, 0)
 
         from threading import Thread
         Thread(
             target=run_test,
-            name="yj64-llm-generation-test-all-participants",
+            name="yj64-llm-generation-test-common-chat",
             daemon=True,
         ).start()
 
@@ -2456,6 +2516,7 @@ class MessageDistributor:
         message: str,
         report: Callable[..., None] | None = None,
         history: list[dict[str, str]] | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         if not self.dialogue_enabled:
             raise DialogueStoppedError(
@@ -2463,7 +2524,9 @@ class MessageDistributor:
             )
         route_id = self.route_for_participant(participant_name)
         operation_id = uuid.uuid4().hex
-        selected_mode = self.mode
+        selected_mode = self.mode if mode is None else str(mode or "text").strip().lower()
+        if selected_mode not in {"text", "agent"}:
+            raise ValueError(f"Unknown message mode marker: {selected_mode}")
         if report is not None:
             report(
                 "distributor_request_marked",
@@ -2569,11 +2632,11 @@ if __name__ == "__main__":
 
 END ALLOWED
 ============================================================ КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
-EXPECTED-GIT-BLOB-SHA:main.py=bf21b906eb2f7be5eb994c0268d975bf922f6c97
+EXPECTED-GIT-BLOB-SHA:main.py=067b422a872bd575993b61bde2cfc61a36a1fcb6
 EXPECTED-GIT-BLOB-SHA:llm_api.py=32571fd86a2e7207257c4ce8742d1d9f0755b115
 EXPECTED-GIT-BLOB-SHA:llm_settings.py=22cef481708a66ce544d395d2e655c3b9022da08
 EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=3ba31910e912241cab181efc57b71cd929262e03
 EXPECTED-GIT-BLOB-SHA:tools/verify_guard.py=887269e44f5fbffc093de87d02e7bf960f3e138b
-EXPECTED-GIT-BLOB-SHA:message_distributor.py=2bf3283494d624406650bf579b721196e645ebeb
+EXPECTED-GIT-BLOB-SHA:message_distributor.py=55de5e6b4ae426900137e58b66d26173e34826e5
 EXPECTED-GIT-BLOB-SHA:.github/workflows/ci.yml=295307267609aea347e7b1ee7c668a5139d96f9c
 EXPECTED-GIT-BLOB-SHA:.github/workflows/android-apk.yml=69a6644b84324115fbac7a823beeda1fc629ecd1

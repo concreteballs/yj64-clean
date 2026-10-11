@@ -769,67 +769,127 @@ class YJ64BaseApp(App):
         Thread(target=run_test, name="yj64-llm-api-test-all-participants", daemon=True).start()
 
     def _test_llm_generation(self, *_: Any) -> None:
+        prompt = "Reply with exactly: YJ64_OK"
+        if not self.message_distributor.dialogue_enabled:
+            self._append_report(
+                "llm_generation_test_rejected",
+                reason="dialogue_stopped",
+                prompt=prompt,
+            )
+            self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
+            return
+
+        target = self._chat_target_details()
+        participant = target["participant"]
+        route_id = target["route_id"]
+        if not target["connected_participants"]:
+            report_text = (
+                "YJ-64 LLM GENERATION TEST — COMMON CHAT\n"
+                "Result: FAILED\n"
+                "Error: No configured participant connection is available."
+            )
+            self._append_report(
+                "llm_generation_test_failed",
+                scope="common_chat",
+                route_id=route_id,
+                error="No configured participant connection is available.",
+            )
+            self._copy_to_clipboard(report_text)
+            self.chat_output.text += f"\n\n{report_text}"
+            self.status.text = report_text
+            return
+
+        from llm_api import load_config
+        config = load_config(self.user_data_dir, route_id=route_id)
+        mode = "agent" if (config.get("agent_id") or "").strip() else "text"
         self._append_report(
-            "llm_generation_test_started", scope="configured_participants"
+            "llm_generation_test_started",
+            scope="common_chat",
+            prompt=prompt,
+            participant=participant,
+            route_id=route_id,
+            mode=mode,
+            connected_participants=target["connected_participants"],
+            reason=target["reason"],
         )
-        self.status.text = "Testing generation for all configured participants..."
+        self.chat_output.text += (
+            f"\n\nUser: {prompt}\nParticipant: {participant}\n"
+            f"Route: {route_id} / {mode}\nTest request sent..."
+        )
+        self.status.text = f"Sending generation test through chat: {participant} / {route_id} / {mode}..."
 
         def run_test() -> None:
             try:
-                from llm_api import test_all_routes
-                result = test_all_routes(
+                result = self.message_distributor.dispatch_message(
                     self.user_data_dir,
-                    include_owner=False,
+                    participant,
+                    prompt,
+                    mode=mode,
                     report=lambda event, **data: self._append_report(
-                        "llm_generation_" + event, **data
+                        "llm_generation_chat_" + event, **data
                     ),
                 )
-                report = result["report"].replace(
-                    "YJ-64 LLM API TEST — ALL CONFIGURED PARTICIPANTS",
-                    "YJ-64 LLM GENERATION TEST — ALL CONFIGURED PARTICIPANTS",
-                )
-                passed = sum(
-                    1 for item in result["results"] if item["status"] == "PASS"
+                report_text = (
+                    "YJ-64 LLM GENERATION TEST — COMMON CHAT\n"
+                    f"Participant: {participant}\n"
+                    f"Route: {route_id}\n"
+                    f"Mode: {mode}\n"
+                    f"Provider: {result['provider']}\n"
+                    f"Model: {result['model']}\n"
+                    f"Prompt: {prompt}\n"
+                    "Result: SUCCESS\n"
+                    f"Response: {result['response']}"
                 )
                 event = (
                     "llm_generation_test_completed",
                     {
-                        "scope": "configured_participants",
-                        "tested_count": len(result["results"]),
-                        "passed": passed,
-                        "failed": len(result["results"]) - passed,
-                        "route_ids": [
-                            item["route_id"] for item in result["results"]
-                        ],
+                        "scope": "common_chat",
+                        "participant": participant,
+                        "route_id": route_id,
+                        "mode": mode,
+                        "provider": result["provider"],
+                        "model": result["model"],
+                        "prompt": prompt,
+                        "response": result["response"],
                     },
                 )
+                chat_result = f"{participant}: {result['response']}"
             except Exception as exc:
-                report = (
-                    "YJ-64 LLM GENERATION TEST — ALL CONFIGURED PARTICIPANTS\n"
+                report_text = (
+                    "YJ-64 LLM GENERATION TEST — COMMON CHAT\n"
+                    f"Participant: {participant}\n"
+                    f"Route: {route_id}\n"
+                    f"Mode: {mode}\n"
+                    f"Prompt: {prompt}\n"
                     "Result: FAILED\n"
                     f"Error: {type(exc).__name__}: {exc}"
                 )
                 event = (
                     "llm_generation_test_failed",
                     {
-                        "scope": "configured_participants",
+                        "scope": "common_chat",
+                        "participant": participant,
+                        "route_id": route_id,
+                        "mode": mode,
+                        "prompt": prompt,
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     },
                 )
+                chat_result = f"{participant}: FAILED — {type(exc).__name__}: {exc}"
 
             def finish(*_args: Any) -> None:
                 self._append_report(event[0], **event[1])
-                self._copy_to_clipboard(report)
-                self.chat_output.text = report
-                self.status.text = report
+                self._copy_to_clipboard(report_text)
+                self.chat_output.text += f"\n{chat_result}"
+                self.status.text = report_text
 
             Clock.schedule_once(finish, 0)
 
         from threading import Thread
         Thread(
             target=run_test,
-            name="yj64-llm-generation-test-all-participants",
+            name="yj64-llm-generation-test-common-chat",
             daemon=True,
         ).start()
 
