@@ -1123,92 +1123,175 @@ class YJ64BaseApp(App):
             )
             self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
             return
-        target = self._chat_target_details()
-        participant = target["participant"]
-        route_id = target["route_id"]
-        mode = self._participant_config_status(participant)["mode"]
+
+        target_details = self._chat_target_details()
+        participants = list(target_details["connected_participants"])
+        if not participants and target_details["owner_connected"]:
+            participants = ["Owner"]
+        if not participants:
+            self._append_report(
+                "llm_chat_send_rejected",
+                reason="no_configured_connections",
+                prompt=prompt,
+            )
+            self.chat_output.text += (
+                f"\n\nUser: {prompt}\nNo configured participant connections are available."
+            )
+            self.status.text = "No configured participant connections are available."
+            self.chat_input.text = ""
+            return
+
         request_history = list(self.common_history) + [
             {"role": "user", "content": prompt}
         ]
+        targets = []
+        for name in participants:
+            details = self._participant_config_status(name)
+            targets.append({
+                "participant": name,
+                "route_id": str(details["route_id"]),
+                "mode": str(details["mode"]),
+                "provider": str(details["provider"]),
+                "model": str(details["model"]),
+            })
         self._append_report(
-            "llm_chat_participant_selected",
-            participant=participant,
-            route_id=route_id,
-            mode=mode,
-            connected_participants=target["connected_participants"],
-            owner_connected=target["owner_connected"],
-            preferred=target["preferred"],
-            reason=target["reason"],
-        )
-        self._append_report(
-            "llm_chat_send_started",
+            "llm_chat_broadcast_started",
             prompt=prompt,
-            participant=participant,
-            route_id=route_id,
-            mode=mode,
+            participants=[item["participant"] for item in targets],
+            route_ids={item["participant"]: item["route_id"] for item in targets},
             history_count=len(request_history),
         )
-        self.status.text = f"Sending common-chat message to {participant} ({mode})..."
+        for target in targets:
+            self._append_report(
+                "llm_chat_send_started",
+                prompt=prompt,
+                participant=target["participant"],
+                route_id=target["route_id"],
+                mode=target["mode"],
+                history_count=len(request_history),
+                broadcast=True,
+            )
+        self.status.text = (
+            "Sending common-chat message to: "
+            + ", ".join(item["participant"] for item in targets)
+        )
         self.chat_input.text = ""
+        self.chat_output.text += (
+            f"\n\nOwner: {prompt}\n"
+            + "\n".join(f"{item['participant']}: waiting for response..." for item in targets)
+        )
 
-        def run_chat() -> None:
+        def run_participant(target: dict[str, str]) -> dict[str, Any]:
+            participant_name = target["participant"]
             try:
                 result = self.message_distributor.dispatch_message(
                     self.user_data_dir,
-                    participant,
+                    participant_name,
                     prompt,
-                    mode=mode,
+                    mode=target["mode"],
                     history=request_history,
-                    report=lambda event, **data: self._append_report(
-                        "llm_chat_" + event, **data
+                    report=lambda event, _participant=participant_name, **data:
+                    self._append_report(
+                        "llm_chat_" + event,
+                        **{"participant": _participant, "broadcast": True, **data},
                     ),
                 )
-                report_text = f"Owner: {prompt}\n{participant}: {result['response']}"
-                event = (
-                    "llm_chat_send_succeeded",
-                    {
-                        "participant": participant,
-                        "route_id": result.get("route_id", route_id),
-                        "mode": mode,
-                        "provider": result["provider"],
-                        "model": result["model"],
-                        "prompt": prompt,
-                        "response": result["response"],
-                    },
-                )
+                return {
+                    "participant": participant_name,
+                    "route_id": result.get("route_id", target["route_id"]),
+                    "mode": target["mode"],
+                    "provider": result["provider"],
+                    "model": result["model"],
+                    "response": result["response"],
+                    "ok": True,
+                }
             except Exception as exc:
-                report_text = (
-                    f"User: {prompt}\n"
-                    f"Participant: {participant}\n"
-                    "Result: FAILED\n"
-                    f"Error: {type(exc).__name__}: {exc}"
-                )
-                event = (
-                    "llm_chat_send_failed",
-                    {
-                        "participant": participant,
-                        "route_id": route_id,
-                        "mode": mode,
-                        "prompt": prompt,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                )
+                return {
+                    "participant": participant_name,
+                    "route_id": target["route_id"],
+                    "mode": target["mode"],
+                    "ok": False,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+
+        def run_chat() -> None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            outcomes: dict[str, dict[str, Any]] = {}
+            with ThreadPoolExecutor(
+                max_workers=len(targets),
+                thread_name_prefix="yj64-common-chat",
+            ) as executor:
+                futures = {
+                    target["participant"]: executor.submit(run_participant, target)
+                    for target in targets
+                }
+                for target in targets:
+                    outcomes[target["participant"]] = futures[target["participant"]].result()
 
             def finish(*_args: Any) -> None:
-                self._append_report(event[0], **event[1])
-                if event[0] == "llm_chat_send_succeeded":
-                    self.common_history.extend([
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": event[1]["response"]},
-                    ])
-                self.chat_output.text += f"\n\n{report_text}"
-                self.status.text = report_text
+                lines = [f"Owner: {prompt}"]
+                successful = 0
+                history_additions: list[dict[str, str]] = [
+                    {"role": "user", "content": prompt}
+                ]
+                for target in targets:
+                    outcome = outcomes[target["participant"]]
+                    participant_name = outcome["participant"]
+                    if outcome["ok"]:
+                        successful += 1
+                        response = str(outcome["response"])
+                        lines.append(
+                            f"{participant_name} ({outcome['provider']} / {outcome['model']}):\n{response}"
+                        )
+                        self._append_report(
+                            "llm_chat_send_succeeded",
+                            participant=participant_name,
+                            route_id=outcome["route_id"],
+                            mode=outcome["mode"],
+                            provider=outcome["provider"],
+                            model=outcome["model"],
+                            prompt=prompt,
+                            response=response,
+                            broadcast=True,
+                        )
+                        history_additions.append({
+                            "role": "assistant",
+                            "content": f"{participant_name}: {response}",
+                        })
+                    else:
+                        error_text = (
+                            f"{outcome['error_type']}: {outcome['error']}"
+                        )
+                        lines.append(f"{participant_name} FAILED:\n{error_text}")
+                        self._append_report(
+                            "llm_chat_send_failed",
+                            participant=participant_name,
+                            route_id=outcome["route_id"],
+                            mode=outcome["mode"],
+                            prompt=prompt,
+                            error_type=outcome["error_type"],
+                            error=outcome["error"],
+                            broadcast=True,
+                        )
+                self.common_history.extend(history_additions)
+                self._append_report(
+                    "llm_chat_broadcast_completed",
+                    prompt=prompt,
+                    participants=[item["participant"] for item in targets],
+                    successful=successful,
+                    failed=len(targets) - successful,
+                )
+                self.chat_output.text += "\n\n" + "\n\n".join(lines[1:])
+                self.status.text = (
+                    f"Common chat completed: {successful}/{len(targets)} participants answered."
+                )
 
             Clock.schedule_once(finish, 0)
 
         from threading import Thread
-        Thread(target=run_chat, name="yj64-llm-chat", daemon=True).start()
+        Thread(target=run_chat, name="yj64-llm-chat-broadcast", daemon=True).start()
 
     def _copy_to_clipboard(self, text: str) -> None:
         try:
@@ -1355,7 +1438,7 @@ class YJ64BaseApp(App):
                 )
 
             def finish(_dt: float) -> None:
-                self._copy_to_clipboard(self._read_report_text())
+                self._copy_to_clipboard(str(self.report_path))
                 self.status.text = summary
             Clock.schedule_once(finish, 0)
 
@@ -2713,10 +2796,10 @@ if __name__ == "__main__":
 
 END ALLOWED
 ============================================================ КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
-EXPECTED-GIT-BLOB-SHA:main.py=e56b0f3d554700d695a6c54ca3cf719626c0b999
+EXPECTED-GIT-BLOB-SHA:main.py=dd21519b7af6347f6ef6e91286694d75f06e49eb
 EXPECTED-GIT-BLOB-SHA:llm_api.py=32571fd86a2e7207257c4ce8742d1d9f0755b115
 EXPECTED-GIT-BLOB-SHA:llm_settings.py=22cef481708a66ce544d395d2e655c3b9022da08
-EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=3ba31910e912241cab181efc57b71cd929262e03
+EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=74f654c38ca98c51906586a334b501ae2bb56a61
 EXPECTED-GIT-BLOB-SHA:tools/verify_guard.py=887269e44f5fbffc093de87d02e7bf960f3e138b
 EXPECTED-GIT-BLOB-SHA:message_distributor.py=55de5e6b4ae426900137e58b66d26173e34826e5
 EXPECTED-GIT-BLOB-SHA:.github/workflows/ci.yml=295307267609aea347e7b1ee7c668a5139d96f9c
