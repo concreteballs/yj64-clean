@@ -255,13 +255,52 @@ public class MonitorActivity extends Activity {
             return;
         }
         final String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
-        final String reportPath = "reports/yj64-report-" + timestamp + ".jsonl";
+        // Keep one stable URL so the user can share it once and refresh the latest report.
+        final String reportPath = "reports/latest-report.jsonl";
         status.setText(identityText() + "\n\nUploading report to GitHub...");
         new Thread(() -> {
             HttpURLConnection connection = null;
             try {
                 URL url = new URL("https://api.github.com/repos/" + GITHUB_OWNER
                     + "/" + GITHUB_REPO + "/contents/" + reportPath);
+                String existingSha = "";
+                HttpURLConnection lookup = (HttpURLConnection) new URL(
+                    "https://api.github.com/repos/" + GITHUB_OWNER + "/" + GITHUB_REPO
+                    + "/contents/" + reportPath + "?ref=" + GITHUB_BRANCH).openConnection();
+                lookup.setRequestMethod("GET");
+                lookup.setConnectTimeout(15000);
+                lookup.setReadTimeout(20000);
+                lookup.setRequestProperty("Accept", "application/vnd.github+json");
+                lookup.setRequestProperty("Authorization", "Bearer " + token);
+                lookup.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
+                int lookupCode = lookup.getResponseCode();
+                if (lookupCode == HttpURLConnection.HTTP_OK) {
+                    try (InputStream in = lookup.getInputStream();
+                         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                        byte[] buffer = new byte[4096];
+                        int count;
+                        while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                        org.json.JSONObject existing = new org.json.JSONObject(
+                            new String(out.toByteArray(), StandardCharsets.UTF_8));
+                        existingSha = existing.optString("sha", "");
+                    }
+                } else if (lookupCode != HttpURLConnection.HTTP_NOT_FOUND) {
+                    InputStream err = lookup.getErrorStream();
+                    String detail = "";
+                    if (err != null) {
+                        try (InputStream in = err;
+                             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                            byte[] buffer = new byte[2048];
+                            int count;
+                            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                            detail = new String(out.toByteArray(), StandardCharsets.UTF_8);
+                        }
+                    }
+                    throw new IOException("GitHub lookup HTTP " + lookupCode + ": "
+                        + detail.substring(0, Math.min(300, detail.length())));
+                }
+                lookup.disconnect();
+
                 connection = (HttpURLConnection) url.openConnection();
                 connection.setRequestMethod("PUT");
                 connection.setConnectTimeout(15000);
@@ -272,9 +311,10 @@ public class MonitorActivity extends Activity {
                 connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
                 org.json.JSONObject payload = new org.json.JSONObject();
-                payload.put("message", "Add YJ-64 diagnostic report " + timestamp);
+                payload.put("message", "Update latest YJ-64 diagnostic report " + timestamp);
                 payload.put("branch", GITHUB_BRANCH);
                 payload.put("content", Base64.encodeToString(reportBytes, Base64.NO_WRAP));
+                if (!existingSha.isEmpty()) payload.put("sha", existingSha);
                 try (OutputStream out = connection.getOutputStream()) {
                     out.write(payload.toString().getBytes(StandardCharsets.UTF_8));
                     out.flush();
@@ -307,7 +347,7 @@ public class MonitorActivity extends Activity {
                 runOnUiThread(() -> {
                     copyText(publishedUrl);
                     status.setText(identityText() + "\n\nGitHub report URL copied:\n" + publishedUrl);
-                    Toast.makeText(this, "Report uploaded; GitHub URL copied", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, "Report uploaded; stable GitHub URL copied", Toast.LENGTH_LONG).show();
                 });
             } catch (Exception e) {
                 append("github_report_upload_failed",
