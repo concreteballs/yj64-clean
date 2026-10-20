@@ -11,6 +11,20 @@ import android.content.Context;
 import android.os.Bundle;
 import android.os.Process;
 import android.view.ViewGroup;
+import android.text.InputType;
+import android.util.Base64;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+import java.security.KeyStore;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -58,9 +72,19 @@ public class MonitorActivity extends Activity {
         root.addView(refresh);
 
         Button copy = new Button(this);
-        copy.setText("Copy report");
-        copy.setOnClickListener(v -> copyReport());
+        copy.setText("Copy report path");
+        copy.setOnClickListener(v -> copyPaths());
         root.addView(copy);
+
+        Button uploadConfig = new Button(this);
+        uploadConfig.setText("Configure GitHub report upload");
+        uploadConfig.setOnClickListener(v -> configureGithubToken());
+        root.addView(uploadConfig);
+
+        Button upload = new Button(this);
+        upload.setText("Upload report to GitHub + copy URL");
+        upload.setOnClickListener(v -> confirmUploadReport());
+        root.addView(upload);
 
         Button paths = new Button(this);
         paths.setText("Copy report paths");
@@ -107,22 +131,193 @@ public class MonitorActivity extends Activity {
         Toast.makeText(this, "Report paths copied", Toast.LENGTH_SHORT).show();
     }
 
-    private void copyReport() {
+    private static final String GITHUB_KEY_ALIAS = "yj64_github_report_upload_key";
+    private static final String GITHUB_TOKEN_FILE = "yj64-github-token.enc";
+    private static final String GITHUB_OWNER = "concreteballs";
+    private static final String GITHUB_REPO = "yj64-clean";
+    private static final String GITHUB_BRANCH = "main";
+
+    private SecretKey githubEncryptionKey() throws Exception {
+        KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+        keyStore.load(null);
+        if (keyStore.containsAlias(GITHUB_KEY_ALIAS)) {
+            return (SecretKey) keyStore.getKey(GITHUB_KEY_ALIAS, null);
+        }
+        KeyGenerator generator = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        generator.init(new KeyGenParameterSpec.Builder(
+            GITHUB_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .build());
+        return generator.generateKey();
+    }
+
+    private File githubTokenFile() {
+        return new File(getFilesDir(), GITHUB_TOKEN_FILE);
+    }
+
+    private void saveGithubToken(String token) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, githubEncryptionKey());
+        byte[] encrypted = cipher.doFinal(token.trim().getBytes(StandardCharsets.UTF_8));
+        byte[] iv = cipher.getIV();
+        byte[] combined = new byte[iv.length + encrypted.length];
+        System.arraycopy(iv, 0, combined, 0, iv.length);
+        System.arraycopy(encrypted, 0, combined, iv.length, encrypted.length);
+        try (FileOutputStream out = new FileOutputStream(githubTokenFile(), false)) {
+            out.write(Base64.encode(combined, Base64.NO_WRAP));
+            out.flush();
+            out.getFD().sync();
+        }
+    }
+
+    private String loadGithubToken() throws Exception {
+        File file = githubTokenFile();
+        if (!file.isFile()) return "";
+        byte[] combined = Base64.decode(readFile(file), Base64.NO_WRAP);
+        if (combined.length <= 12) throw new IOException("Stored GitHub token is invalid");
+        byte[] iv = java.util.Arrays.copyOfRange(combined, 0, 12);
+        byte[] encrypted = java.util.Arrays.copyOfRange(combined, 12, combined.length);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, githubEncryptionKey(), new GCMParameterSpec(128, iv));
+        return new String(cipher.doFinal(encrypted), StandardCharsets.UTF_8);
+    }
+
+    private void configureGithubToken() {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        input.setHint("Fine-grained GitHub token");
+        new AlertDialog.Builder(this)
+            .setTitle("GitHub report upload")
+            .setMessage("Use a fine-grained token restricted to concreteballs/yj64-clean with Contents: Read and write. The token is encrypted with Android Keystore on this device; it is not embedded in the APK.")
+            .setView(input)
+            .setNegativeButton("CANCEL", (dialog, which) -> dialog.dismiss())
+            .setPositiveButton("SAVE TOKEN", (dialog, which) -> {
+                String token = input.getText().toString().trim();
+                if (token.isEmpty()) {
+                    Toast.makeText(this, "Token was empty", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                try {
+                    saveGithubToken(token);
+                    append("github_report_token_saved", "{\"encrypted\":true}");
+                    Toast.makeText(this, "GitHub token saved securely on this device", Toast.LENGTH_LONG).show();
+                } catch (Exception e) {
+                    append("github_report_token_save_failed",
+                        "{\"error_type\":\"" + escape(e.getClass().getSimpleName()) + "\"}");
+                    Toast.makeText(this, "Token save failed: " + e.getClass().getSimpleName(), Toast.LENGTH_LONG).show();
+                }
+            })
+            .show();
+    }
+
+    private void confirmUploadReport() {
+        new AlertDialog.Builder(this)
+            .setTitle("Publish diagnostic report?")
+            .setMessage("This uploads the complete JSONL report to the PUBLIC repository concreteballs/yj64-clean. It may contain prompts, model responses, and error details. Continue only if you are comfortable making those diagnostics public.")
+            .setNegativeButton("CANCEL", (dialog, which) -> dialog.dismiss())
+            .setPositiveButton("UPLOAD", (dialog, which) -> uploadReportToGitHub())
+            .show();
+    }
+
+    private void uploadReportToGitHub() {
+        final String token;
+        try {
+            token = loadGithubToken();
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not decrypt GitHub token. Configure it again.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (token.isEmpty()) {
+            Toast.makeText(this, "Configure a GitHub token first", Toast.LENGTH_LONG).show();
+            configureGithubToken();
+            return;
+        }
         File file = reportFile();
-        if (!file.exists()) {
-            Toast.makeText(this, "Report file does not exist yet", Toast.LENGTH_SHORT).show();
+        if (!file.isFile()) {
+            Toast.makeText(this, "Report file does not exist yet", Toast.LENGTH_LONG).show();
             return;
         }
-        StringBuilder text = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) text.append(line).append('\n');
+        final byte[] reportBytes;
+        try (FileInputStream in = new FileInputStream(file);
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            reportBytes = out.toByteArray();
         } catch (IOException e) {
-            Toast.makeText(this, "Report read failed: " + e, Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Report read failed: " + e.getClass().getSimpleName(), Toast.LENGTH_LONG).show();
             return;
         }
-        copyText(text.toString());
-        Toast.makeText(this, "Report copied", Toast.LENGTH_SHORT).show();
+        final String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+        final String reportPath = "reports/yj64-report-" + timestamp + ".jsonl";
+        status.setText(identityText() + "\n\nUploading report to GitHub...");
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL("https://api.github.com/repos/" + GITHUB_OWNER
+                    + "/" + GITHUB_REPO + "/contents/" + reportPath);
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("PUT");
+                connection.setConnectTimeout(15000);
+                connection.setReadTimeout(30000);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Accept", "application/vnd.github+json");
+                connection.setRequestProperty("Authorization", "Bearer " + token);
+                connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                org.json.JSONObject payload = new org.json.JSONObject();
+                payload.put("message", "Add YJ-64 diagnostic report " + timestamp);
+                payload.put("branch", GITHUB_BRANCH);
+                payload.put("content", Base64.encodeToString(reportBytes, Base64.NO_WRAP));
+                try (OutputStream out = connection.getOutputStream()) {
+                    out.write(payload.toString().getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                }
+                int code = connection.getResponseCode();
+                InputStream responseStream = code >= 200 && code < 300
+                    ? connection.getInputStream() : connection.getErrorStream();
+                String responseText = "";
+                if (responseStream != null) {
+                    try (InputStream in = responseStream;
+                         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                        byte[] buffer = new byte[4096];
+                        int count;
+                        while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                        responseText = new String(out.toByteArray(), StandardCharsets.UTF_8);
+                    }
+                }
+                if (code < 200 || code >= 300) {
+                    throw new IOException("GitHub HTTP " + code + ": " + responseText.substring(0, Math.min(500, responseText.length())));
+                }
+                org.json.JSONObject response = new org.json.JSONObject(responseText);
+                org.json.JSONObject content = response.optJSONObject("content");
+                String htmlUrl = content == null ? "" : content.optString("html_url", "");
+                if (htmlUrl.isEmpty()) {
+                    throw new IOException("GitHub accepted upload but returned no file URL");
+                }
+                final String publishedUrl = htmlUrl;
+                append("github_report_upload_succeeded",
+                    "{\"path\":\"" + escape(reportPath) + "\",\"url\":\"" + escape(publishedUrl) + "\",\"bytes\":" + reportBytes.length + "}");
+                runOnUiThread(() -> {
+                    copyText(publishedUrl);
+                    status.setText(identityText() + "\n\nGitHub report URL copied:\n" + publishedUrl);
+                    Toast.makeText(this, "Report uploaded; GitHub URL copied", Toast.LENGTH_LONG).show();
+                });
+            } catch (Exception e) {
+                append("github_report_upload_failed",
+                    "{\"path\":\"" + escape(reportPath) + "\",\"error_type\":\"" + escape(e.getClass().getSimpleName()) + "\",\"error\":\"" + escape(String.valueOf(e.getMessage())) + "\"}");
+                runOnUiThread(() -> {
+                    status.setText(identityText() + "\n\nGitHub upload failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                    Toast.makeText(this, "GitHub upload failed: " + e.getClass().getSimpleName(), Toast.LENGTH_LONG).show();
+                });
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "yj64-github-report-upload").start();
     }
 
     private void copyText(String text) {
@@ -243,9 +438,9 @@ public class MonitorActivity extends Activity {
                         append("full_test_result_collected",
                             "{\"test_id\":\"" + testId + "\"}");
                         runOnUiThread(() -> {
-                            copyText(report);
-                            status.setText(report);
-                            Toast.makeText(this, "Full test report copied", Toast.LENGTH_SHORT).show();
+                            copyPaths();
+                            status.setText(identityText() + "\n\nFull test completed. Report paths copied.");
+                            Toast.makeText(this, "Full test completed; report paths copied", Toast.LENGTH_SHORT).show();
                         });
                         return;
                     }
