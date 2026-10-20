@@ -2,7 +2,7 @@ name: YJ-64 Guard Validation
 
 on:
   push:
-    branches: ['main']
+    branches: ['main', 'work/common-chat-broadcast-report-path']
     paths:
       - 'PROTECTED-LINE-GUARD'
       - 'main.py'
@@ -12,7 +12,7 @@ on:
       - '.github/workflows/ci.yml'
       - 'tools/verify_guard.py'
   pull_request:
-    branches: ['main']
+    branches: ['main', 'work/common-chat-broadcast-report-path']
     paths:
       - 'PROTECTED-LINE-GUARD'
       - 'main.py'
