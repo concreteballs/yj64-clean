@@ -55,6 +55,8 @@ class YJ64BaseApp(App):
     def build(self):
         from message_distributor import MessageDistributor
         self.message_distributor = MessageDistributor()
+        self.common_history: list[dict[str, str]] = []
+        self.private_histories: dict[str, list[dict[str, str]]] = {}
         self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
         self.pid_path = Path(self.user_data_dir) / "yj64-main-process.pid"
         self.status = Label(
@@ -236,9 +238,10 @@ class YJ64BaseApp(App):
         route_id = self.message_distributor.route_for_participant(participant_name)
         configured = route_config_exists(self.user_data_dir, route_id)
         config = load_config(self.user_data_dir, route_id=route_id) if configured else {}
+        mode = "agent" if str(config.get("agent_id") or "").strip() else "text"
         return {
             "configured": configured,
-            "mode": self.message_distributor.mode,
+            "mode": mode,
             "route_id": route_id,
             "provider": str(config.get("provider") or ""),
             "model": str(config.get("model") or ""),
@@ -327,45 +330,76 @@ class YJ64BaseApp(App):
 
     def _open_participant_chat(self, participant_name: str) -> None:
         status = self._participant_config_status(participant_name)
+        route_id = status["route_id"]
+        mode = status["mode"]
         self._append_report(
             "participant_chat_opened",
             participant=participant_name,
             configured=status["configured"],
-            mode=status["mode"],
+            mode=mode,
             provider=status["provider"],
             model=status["model"],
         )
 
+        history = self.private_histories.setdefault(participant_name, [])
+        output_lines = [
+            f"{'You' if item.get('role') == 'user' else participant_name}:\n{item.get('content', '')}"
+            for item in history
+        ]
         content = BoxLayout(orientation="vertical", spacing=8, padding=12)
         output = TextInput(
-            text=f"{participant_name} response will appear here.",
+            text="\n\n".join(output_lines) or f"{participant_name} private conversation.",
             readonly=True,
             multiline=True,
         )
         prompt = TextInput(
-            hint_text=f"Message to {participant_name}...",
+            hint_text=f"Private message to {participant_name}...",
             multiline=True,
             size_hint_y=None,
             height=110,
             write_tab=False,
         )
-        send = Button(text="SEND", size_hint_y=None, height=54)
+        send = Button(text="SEND PRIVATELY", size_hint_y=None, height=54)
+        publish = Button(
+            text="PUBLISH LAST EXCHANGE TO COMMON CHAT",
+            size_hint_y=None,
+            height=48,
+        )
         close = Button(text="CLOSE", size_hint_y=None, height=54)
-
         content.add_widget(output)
         content.add_widget(prompt)
         content.add_widget(send)
+        content.add_widget(publish)
         content.add_widget(close)
-
         popup = Popup(
-            title=f"{participant_name} CHAT",
+            title=f"{participant_name} PRIVATE CHAT",
             content=content,
-            size_hint=(0.94, 0.72),
+            size_hint=(0.94, 0.78),
         )
-        self.message_distributor.set_private_participant(participant_name)
-        popup.bind(
-            on_dismiss=lambda *_: self.message_distributor.set_private_participant(None)
-        )
+        last_exchange: dict[str, Any] = {}
+
+        def publish_last_exchange(*_args: Any) -> None:
+            exchange = last_exchange.get("messages")
+            if not exchange:
+                output.text += "\n\nNo completed private exchange to publish."
+                return
+            if last_exchange.get("published"):
+                output.text += "\n\nThis exchange was already published."
+                return
+            self.common_history.extend(exchange)
+            rendered = "\n\n".join(
+                f"{'Owner' if item['role'] == 'user' else participant_name}:\n{item['content']}"
+                for item in exchange
+            )
+            self.chat_output.text += f"\n\n[PUBLISHED FROM {participant_name} PRIVATE CHAT]\n{rendered}"
+            last_exchange["published"] = True
+            self._append_report(
+                "participant_private_exchange_published",
+                participant=participant_name,
+                route_id=route_id,
+                message_count=len(exchange),
+            )
+            self.status.text = f"Last private exchange from {participant_name} published to common chat."
 
         def send_message(*_args: Any) -> None:
             message = prompt.text.strip()
@@ -381,32 +415,41 @@ class YJ64BaseApp(App):
                 return
             prompt.text = ""
             send.disabled = True
-            output.text = "Sending..."
+            output.text += f"\n\nYou: {message}\n\nSending privately..."
+            common_context = list(self.common_history)
+            private_context = list(self.private_histories.get(participant_name, []))
+            request_history = common_context + private_context + [
+                {"role": "user", "content": message}
+            ]
             self._append_report(
                 "participant_request_started",
                 participant=participant_name,
-                route_id=status["route_id"],
-                mode=self.message_distributor.mode,
+                route_id=route_id,
+                mode=mode,
                 prompt=message,
                 provider=status["provider"],
                 model=status["model"],
+                common_history_count=len(common_context),
+                private_history_count=len(private_context),
             )
-            self.chat_output.text += f"\n\nOwner: {message}"
 
             def run_chat() -> None:
                 try:
                     self._append_report(
                         "participant_api_request_sent",
                         participant=participant_name,
-                        route_id=status["route_id"],
-                        mode=self.message_distributor.mode,
+                        route_id=route_id,
+                        mode=mode,
                         provider=status["provider"],
                         model=status["model"],
+                        history_count=len(request_history),
                     )
                     result = self.message_distributor.dispatch_message(
                         self.user_data_dir,
                         participant_name,
                         message,
+                        mode=mode,
+                        history=request_history,
                         report=lambda event, **data: self._append_report(
                             "participant_" + event,
                             **{"participant": participant_name, **data},
@@ -417,6 +460,8 @@ class YJ64BaseApp(App):
                         "participant_api_response_received",
                         {
                             "participant": participant_name,
+                            "route_id": route_id,
+                            "mode": mode,
                             "provider": result["provider"],
                             "model": result["model"],
                             "response": response,
@@ -428,19 +473,31 @@ class YJ64BaseApp(App):
                         "participant_request_failed",
                         {
                             "participant": participant_name,
+                            "route_id": route_id,
+                            "mode": mode,
                             "error_type": type(exc).__name__,
                             "error": str(exc),
                         },
                     )
-                    text_value = (
-                        f"FAILED: {type(exc).__name__}: {exc}"
-                    )
+                    text_value = f"FAILED: {type(exc).__name__}: {exc}"
 
                 def finish(*_finish_args: Any) -> None:
                     self._append_report(event[0], **event[1])
-                    output.text = text_value
                     if event[0] == "participant_api_response_received":
-                        self.chat_output.text += f"\n\n{participant_name}:\n{text_value}"
+                        exchange = [
+                            {"role": "user", "content": message},
+                            {"role": "assistant", "content": text_value},
+                        ]
+                        self.private_histories.setdefault(participant_name, []).extend(exchange)
+                        last_exchange["messages"] = exchange
+                        last_exchange["published"] = False
+                        history_text = "\n\n".join(
+                            f"{'You' if item['role'] == 'user' else participant_name}:\n{item['content']}"
+                            for item in self.private_histories[participant_name]
+                        )
+                        output.text = history_text
+                    else:
+                        output.text += f"\n\n{text_value}"
                     send.disabled = False
 
                 Clock.schedule_once(finish, 0)
@@ -453,6 +510,7 @@ class YJ64BaseApp(App):
             ).start()
 
         send.bind(on_release=send_message)
+        publish.bind(on_release=publish_last_exchange)
         close.bind(on_release=lambda *_: popup.dismiss())
         popup.open()
 
@@ -825,9 +883,7 @@ class YJ64BaseApp(App):
         from llm_api import load_config
         config = load_config(self.user_data_dir, route_id=route_id)
         mode = "agent" if (config.get("agent_id") or "").strip() else "text"
-        # Keep the following ordinary chat message on the same mode/path as this test.
-        self.message_distributor.set_mode(mode)
-        self.mode_button.text = f"REQUEST MODE: {mode.upper()}"
+        # Select mode for this route only; tests must not mutate the global chat mode.
         self._append_report(
             "llm_generation_test_chat_mode_selected",
             participant=participant,
@@ -970,7 +1026,7 @@ class YJ64BaseApp(App):
         target = self._chat_target_details()
         participant = target["participant"]
         route_id = target["route_id"]
-        mode = self.message_distributor.mode
+        mode = self._participant_config_status(participant)["mode"]
         self._append_report(
             "llm_chat_route_test_started",
             prompt=prompt,
@@ -990,6 +1046,7 @@ class YJ64BaseApp(App):
                     self.user_data_dir,
                     participant,
                     prompt,
+                    mode=mode,
                     report=lambda event, **data: self._append_report(
                         "llm_chat_route_test_" + event, **data
                     ),
@@ -1068,10 +1125,16 @@ class YJ64BaseApp(App):
             return
         target = self._chat_target_details()
         participant = target["participant"]
+        route_id = target["route_id"]
+        mode = self._participant_config_status(participant)["mode"]
+        request_history = list(self.common_history) + [
+            {"role": "user", "content": prompt}
+        ]
         self._append_report(
             "llm_chat_participant_selected",
             participant=participant,
-            route_id=target["route_id"],
+            route_id=route_id,
+            mode=mode,
             connected_participants=target["connected_participants"],
             owner_connected=target["owner_connected"],
             preferred=target["preferred"],
@@ -1081,10 +1144,11 @@ class YJ64BaseApp(App):
             "llm_chat_send_started",
             prompt=prompt,
             participant=participant,
-            route_id=target["route_id"],
-            mode=self.message_distributor.mode,
+            route_id=route_id,
+            mode=mode,
+            history_count=len(request_history),
         )
-        self.status.text = "Sending chat message to LLM..."
+        self.status.text = f"Sending common-chat message to {participant} ({mode})..."
         self.chat_input.text = ""
 
         def run_chat() -> None:
@@ -1093,6 +1157,8 @@ class YJ64BaseApp(App):
                     self.user_data_dir,
                     participant,
                     prompt,
+                    mode=mode,
+                    history=request_history,
                     report=lambda event, **data: self._append_report(
                         "llm_chat_" + event, **data
                     ),
@@ -1102,8 +1168,8 @@ class YJ64BaseApp(App):
                     "llm_chat_send_succeeded",
                     {
                         "participant": participant,
-                        "route_id": result.get("route_id", target["route_id"]),
-                        "mode": self.message_distributor.mode,
+                        "route_id": result.get("route_id", route_id),
+                        "mode": mode,
                         "provider": result["provider"],
                         "model": result["model"],
                         "prompt": prompt,
@@ -1121,8 +1187,8 @@ class YJ64BaseApp(App):
                     "llm_chat_send_failed",
                     {
                         "participant": participant,
-                        "route_id": target["route_id"],
-                        "mode": self.message_distributor.mode,
+                        "route_id": route_id,
+                        "mode": mode,
                         "prompt": prompt,
                         "error_type": type(exc).__name__,
                         "error": str(exc),
@@ -1131,6 +1197,11 @@ class YJ64BaseApp(App):
 
             def finish(*_args: Any) -> None:
                 self._append_report(event[0], **event[1])
+                if event[0] == "llm_chat_send_succeeded":
+                    self.common_history.extend([
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": event[1]["response"]},
+                    ])
                 self.chat_output.text += f"\n\n{report_text}"
                 self.status.text = report_text
 
@@ -2642,7 +2713,7 @@ if __name__ == "__main__":
 
 END ALLOWED
 ============================================================ КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
-EXPECTED-GIT-BLOB-SHA:main.py=f600d1f18fd1deacddbcc6d94d05088732cd53d5
+EXPECTED-GIT-BLOB-SHA:main.py=e56b0f3d554700d695a6c54ca3cf719626c0b999
 EXPECTED-GIT-BLOB-SHA:llm_api.py=32571fd86a2e7207257c4ce8742d1d9f0755b115
 EXPECTED-GIT-BLOB-SHA:llm_settings.py=22cef481708a66ce544d395d2e655c3b9022da08
 EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=3ba31910e912241cab181efc57b71cd929262e03
