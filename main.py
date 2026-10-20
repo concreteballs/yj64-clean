@@ -1170,9 +1170,7 @@ class YJ64BaseApp(App):
                     report=lambda event, _participant=participant_name, **data:
                     self._append_report(
                         "llm_chat_" + event,
-                        participant=_participant,
-                        broadcast=True,
-                        **data,
+                        **{"participant": _participant, "broadcast": True, **data},
                     ),
                 )
                 return {
