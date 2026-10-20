@@ -35,6 +35,10 @@ class YJ64BaseApp(App):
         self.common_history: list[dict[str, str]] = []
         self.private_histories: dict[str, list[dict[str, str]]] = {}
         self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
+        self.common_history_path = Path(self.user_data_dir) / "yj64-common-chat.json"
+        self._dialogue_loop_running = False
+        self._chat_session_id = 0
+        self._load_common_history()
         self.pid_path = Path(self.user_data_dir) / "yj64-main-process.pid"
         self.status = Label(
             text="Starting embedded diagnostic agent...",
@@ -99,7 +103,7 @@ class YJ64BaseApp(App):
             height=42,
         ))
         self.chat_output = TextInput(
-            text="The successful generation test will appear here.",
+            text=self._format_common_history() or "No messages yet. Send a prompt to start the common chat.",
             readonly=True,
             multiline=True,
             size_hint_y=None,
@@ -129,7 +133,12 @@ class YJ64BaseApp(App):
         chat_send.bind(on_release=self._send_llm_chat)
         chat_row.add_widget(chat_send)
         root.add_widget(chat_row)
-
+        self.dialogue_control_button = Button(text="START DIALOGUE", size_hint_y=None, height=50, background_color=(0.8,0.18,0.18,1))
+        self.dialogue_control_button.bind(on_release=self._toggle_dialogue_control)
+        root.add_widget(self.dialogue_control_button)
+        clear_chat_button = Button(text="CLEAR CHAT", size_hint_y=None, height=46, background_color=(0.8,0.18,0.18,1))
+        clear_chat_button.bind(on_release=self._confirm_clear_common_chat)
+        root.add_widget(clear_chat_button)
         chat_test_button = Button(
             text="TEST CHAT ROUTE (YJ64_OK)",
             size_hint_y=None,
@@ -686,6 +695,43 @@ class YJ64BaseApp(App):
         close.bind(on_release=lambda *_: popup.dismiss())
         popup.open()
 
+    def _load_common_history(self) -> None:
+        try:
+            if self.common_history_path.is_file():
+                data=json.loads(self.common_history_path.read_text(encoding="utf-8"))
+                if isinstance(data,list):
+                    self.common_history=[{"role":x["role"],"content":x["content"]} for x in data if isinstance(x,dict) and x.get("role") in ("user","assistant") and isinstance(x.get("content"),str)]
+        except (OSError,ValueError,TypeError,KeyError) as exc:
+            self._append_report("common_chat_history_load_failed",error_type=type(exc).__name__,error=str(exc))
+    def _save_common_history(self) -> None:
+        try:
+            self.common_history_path.parent.mkdir(parents=True,exist_ok=True)
+            tmp=self.common_history_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.common_history,ensure_ascii=False,indent=2),encoding="utf-8"); tmp.replace(self.common_history_path)
+        except OSError as exc:
+            self._append_report("common_chat_history_save_failed",error_type=type(exc).__name__,error=str(exc))
+    def _format_common_history(self) -> str:
+        return "\n\n".join(("Owner:\n" if x.get("role")=="user" else "")+str(x.get("content","")) for x in self.common_history)
+    def _toggle_dialogue_control(self,*_:Any)->None:
+        enabled=not self.message_distributor.dialogue_enabled
+        self.message_distributor.set_dialogue_enabled(enabled)
+        self.dialogue_control_button.text="STOP DIALOGUE" if enabled else "START DIALOGUE"
+        self.dialogue_control_button.background_color=(0.2,0.7,0.3,1) if enabled else (0.8,0.18,0.18,1)
+        self._append_report("common_chat_dialogue_control_changed",enabled=enabled,loop_running=self._dialogue_loop_running)
+    def _confirm_clear_common_chat(self,*_:Any)->None:
+        content=BoxLayout(orientation="vertical",spacing=12,padding=16)
+        content.add_widget(Label(text="Clear the saved common chat? This cannot be undone."))
+        row=BoxLayout(size_hint_y=None,height=52,spacing=10); cancel=Button(text="CANCEL"); yes=Button(text="CLEAR CHAT")
+        row.add_widget(cancel);row.add_widget(yes);content.add_widget(row)
+        popup=Popup(title="Confirm chat clearing",content=content,size_hint=(0.9,0.34))
+        cancel.bind(on_release=popup.dismiss);yes.bind(on_release=lambda *_:(popup.dismiss(),self._clear_common_chat()));popup.open()
+    def _clear_common_chat(self)->None:
+        self._chat_session_id+=1;self.message_distributor.set_dialogue_enabled(False);self.common_history.clear();self._save_common_history()
+        self.chat_output.text="Chat cleared.";self.dialogue_control_button.text="START DIALOGUE";self.dialogue_control_button.background_color=(0.8,0.18,0.18,1)
+        self._append_report("common_chat_cleared",explicit_user_action=True)
+    def on_stop(self)->None:
+        self._save_common_history()
+
     def _process_name(self) -> str:
         try:
             from jnius import autoclass
@@ -1088,187 +1134,61 @@ class YJ64BaseApp(App):
             daemon=True,
         ).start()
 
-    def _send_llm_chat(self, *_: Any) -> None:
-        prompt = self.chat_input.text.strip()
-        if not prompt:
-            return
+    def _send_llm_chat(self,*_:Any)->None:
+        prompt=self.chat_input.text.strip()
+        if not prompt:return
         if not self.message_distributor.dialogue_enabled:
-            self._append_report(
-                "llm_chat_send_rejected",
-                reason="dialogue_stopped",
-                prompt=prompt,
-            )
-            self.status.text = "Dialogue is stopped. Resume it before sending new LLM requests."
-            return
-
-        target_details = self._chat_target_details()
-        participants = list(target_details["connected_participants"])
-        if not participants and target_details["owner_connected"]:
-            participants = ["Owner"]
-        if not participants:
-            self._append_report(
-                "llm_chat_send_rejected",
-                reason="no_configured_connections",
-                prompt=prompt,
-            )
-            self.chat_output.text += (
-                f"\n\nUser: {prompt}\nNo configured participant connections are available."
-            )
-            self.status.text = "No configured participant connections are available."
-            self.chat_input.text = ""
-            return
-
-        request_history = list(self.common_history) + [
-            {"role": "user", "content": prompt}
-        ]
-        targets = []
-        for name in participants:
-            details = self._participant_config_status(name)
-            targets.append({
-                "participant": name,
-                "route_id": str(details["route_id"]),
-                "mode": str(details["mode"]),
-                "provider": str(details["provider"]),
-                "model": str(details["model"]),
-            })
-        self._append_report(
-            "llm_chat_broadcast_started",
-            prompt=prompt,
-            participants=[item["participant"] for item in targets],
-            route_ids={item["participant"]: item["route_id"] for item in targets},
-            history_count=len(request_history),
-        )
-        for target in targets:
-            self._append_report(
-                "llm_chat_send_started",
-                prompt=prompt,
-                participant=target["participant"],
-                route_id=target["route_id"],
-                mode=target["mode"],
-                history_count=len(request_history),
-                broadcast=True,
-            )
-        self.status.text = (
-            "Sending common-chat message to: "
-            + ", ".join(item["participant"] for item in targets)
-        )
-        self.chat_input.text = ""
-        self.chat_output.text += (
-            f"\n\nOwner: {prompt}\n"
-            + "\n".join(f"{item['participant']}: waiting for response..." for item in targets)
-        )
-
-        def run_participant(target: dict[str, str]) -> dict[str, Any]:
-            participant_name = target["participant"]
+            self._append_report("llm_chat_send_rejected",reason="dialogue_stopped",prompt=prompt);self.status.text="Press START DIALOGUE before sending.";return
+        if self._dialogue_loop_running:self.status.text="Dialogue is already running.";return
+        names=[n for n in ("Participant 1","Participant 2","Participant 3") if self._participant_config_status(n)["configured"]]
+        if len(names)<2:
+            self._append_report("llm_chat_send_rejected",reason="at_least_two_participants_required",participants=names);self.status.text="Configure at least two participants.";return
+        targets=[]
+        for n in names:
+            d=self._participant_config_status(n);targets.append({"participant":n,"route_id":str(d["route_id"]),"mode":str(d["mode"])})
+        old=list(self.common_history);self.common_history.append({"role":"user","content":prompt});self._save_common_history();self.chat_input.text="";self.chat_output.text=self._format_common_history()
+        session=self._chat_session_id;self._dialogue_loop_running=True;self._append_report("llm_chat_broadcast_started",prompt=prompt,participants=names,sequential=True)
+        def loop():
+            msgs=[{"id":"owner-"+uuid.uuid4().hex,"speaker":"Owner","text":prompt}];sent={n:{msgs[0]["id"]} for n in names}
+            hist={n:old+[{"role":"user","content":prompt}] for n in names};failed=0;turn=0
             try:
-                result = self.message_distributor.dispatch_message(
-                    self.user_data_dir,
-                    participant_name,
-                    prompt,
-                    mode=target["mode"],
-                    history=request_history,
-                    report=lambda event, _participant=participant_name, **data:
-                    self._append_report(
-                        "llm_chat_" + event,
-                        **{"participant": _participant, "broadcast": True, **data},
-                    ),
-                )
-                return {
-                    "participant": participant_name,
-                    "route_id": result.get("route_id", target["route_id"]),
-                    "mode": target["mode"],
-                    "provider": result["provider"],
-                    "model": result["model"],
-                    "response": result["response"],
-                    "ok": True,
-                }
-            except Exception as exc:
-                return {
-                    "participant": participant_name,
-                    "route_id": target["route_id"],
-                    "mode": target["mode"],
-                    "ok": False,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                }
-
-        def run_chat() -> None:
-            from concurrent.futures import ThreadPoolExecutor
-
-            outcomes: dict[str, dict[str, Any]] = {}
-            with ThreadPoolExecutor(
-                max_workers=len(targets),
-                thread_name_prefix="yj64-common-chat",
-            ) as executor:
-                futures = {
-                    target["participant"]: executor.submit(run_participant, target)
-                    for target in targets
-                }
-                for target in targets:
-                    outcomes[target["participant"]] = futures[target["participant"]].result()
-
-            def finish(*_args: Any) -> None:
-                lines = [f"Owner: {prompt}"]
-                successful = 0
-                history_additions: list[dict[str, str]] = [
-                    {"role": "user", "content": prompt}
-                ]
-                for target in targets:
-                    outcome = outcomes[target["participant"]]
-                    participant_name = outcome["participant"]
-                    if outcome["ok"]:
-                        successful += 1
-                        response = str(outcome["response"])
-                        lines.append(
-                            f"{participant_name} ({outcome['provider']} / {outcome['model']}):\n{response}"
-                        )
-                        self._append_report(
-                            "llm_chat_send_succeeded",
-                            participant=participant_name,
-                            route_id=outcome["route_id"],
-                            mode=outcome["mode"],
-                            provider=outcome["provider"],
-                            model=outcome["model"],
-                            prompt=prompt,
-                            response=response,
-                            broadcast=True,
-                        )
-                        history_additions.append({
-                            "role": "assistant",
-                            "content": f"{participant_name}: {response}",
-                        })
-                    else:
-                        error_text = (
-                            f"{outcome['error_type']}: {outcome['error']}"
-                        )
-                        lines.append(f"{participant_name} FAILED:\n{error_text}")
-                        self._append_report(
-                            "llm_chat_send_failed",
-                            participant=participant_name,
-                            route_id=outcome["route_id"],
-                            mode=outcome["mode"],
-                            prompt=prompt,
-                            error_type=outcome["error_type"],
-                            error=outcome["error"],
-                            broadcast=True,
-                        )
-                self.common_history.extend(history_additions)
-                self._append_report(
-                    "llm_chat_broadcast_completed",
-                    prompt=prompt,
-                    participants=[item["participant"] for item in targets],
-                    successful=successful,
-                    failed=len(targets) - successful,
-                )
-                self.chat_output.text += "\n\n" + "\n\n".join(lines[1:])
-                self.status.text = (
-                    f"Common chat completed: {successful}/{len(targets)} participants answered."
-                )
-
-            Clock.schedule_once(finish, 0)
-
+                # Initial prompt is sent sequentially, Participant 1 then Participant 2 etc.
+                for t in targets:
+                    if session!=self._chat_session_id or not self.message_distributor.dialogue_enabled:return
+                    n=t["participant"]
+                    try:
+                        r=self.message_distributor.dispatch_message(self.user_data_dir,n,prompt,mode=t["mode"],history=hist[n],report=lambda event,_n=n,**d:self._append_report("llm_chat_"+event,participant=_n,**d))
+                        answer=str(r["response"])
+                    except Exception as ex:
+                        failed+=1;answer=f"FAILED: {type(ex).__name__}: {ex}";self._append_report("llm_chat_send_failed",participant=n,route_id=t["route_id"],error_type=type(ex).__name__,error=str(ex))
+                        self.common_history.append({"role":"assistant","content":f"{n} {answer}"});self._save_common_history();Clock.schedule_once(lambda _dt:setattr(self.chat_output,"text",self._format_common_history()),0);continue
+                    msgs.append({"id":uuid.uuid4().hex,"speaker":n,"text":answer});sent[n].add(msgs[-1]["id"]);hist[n].append({"role":"assistant","content":f"{n}: {answer}"})
+                    self.common_history.append({"role":"assistant","content":f"{n}:\n{answer}"});self._append_report("llm_chat_send_succeeded",participant=n,route_id=r.get("route_id",t["route_id"]),response=answer);self._save_common_history()
+                    Clock.schedule_once(lambda _dt:setattr(self.chat_output,"text",self._format_common_history()),0)
+                if failed:return
+                i=0
+                while session==self._chat_session_id and self.message_distributor.dialogue_enabled:
+                    t=targets[i%len(targets)];i+=1;n=t["participant"];incoming=[x for x in msgs if x["speaker"]!=n and x["id"] not in sent[n]]
+                    if not incoming:time.sleep(0.1);continue
+                    for x in incoming:hist[n].append({"role":"user","content":f"{x['speaker']}: {x['text']}"});sent[n].add(x["id"])
+                    x=incoming[-1];self._append_report("llm_chat_message_forwarded",participant=n,message_ids=[q["id"] for q in incoming],send_count=len(incoming))
+                    if session!=self._chat_session_id or not self.message_distributor.dialogue_enabled:break
+                    try:r=self.message_distributor.dispatch_message(self.user_data_dir,n,f"{x['speaker']}: {x['text']}",mode=t["mode"],history=hist[n],report=lambda event,_n=n,**d:self._append_report("llm_chat_"+event,participant=_n,**d));answer=str(r["response"])
+                    except Exception as ex:
+                        failed+=1;self.common_history.append({"role":"assistant","content":f"{n} FAILED: {type(ex).__name__}: {ex}"});self._append_report("llm_chat_send_failed",participant=n,route_id=t["route_id"],error_type=type(ex).__name__,error=str(ex));self._save_common_history();break
+                    msgs.append({"id":uuid.uuid4().hex,"speaker":n,"text":answer});sent[n].add(msgs[-1]["id"]);hist[n].append({"role":"assistant","content":f"{n}: {answer}"})
+                    self.common_history.append({"role":"assistant","content":f"{n}:\n{answer}"});turn+=1;self._append_report("llm_chat_send_succeeded",participant=n,route_id=r.get("route_id",t["route_id"]),response=answer,turn=turn);self._save_common_history()
+                    Clock.schedule_once(lambda _dt:setattr(self.chat_output,"text",self._format_common_history()),0)
+                    if failed:break
+            finally:
+                self._append_report("llm_chat_broadcast_completed",participants=names,failed=failed,dialogue_turns=turn)
+                def done(_dt):
+                    self._dialogue_loop_running=False;self.chat_output.text=self._format_common_history()
+                    if not self.message_distributor.dialogue_enabled:self.dialogue_control_button.text="START DIALOGUE";self.dialogue_control_button.background_color=(0.8,0.18,0.18,1)
+                    self.status.text="Dialogue stopped." if not self.message_distributor.dialogue_enabled else "Dialogue stopped after participant error."
+                Clock.schedule_once(done,0)
         from threading import Thread
-        Thread(target=run_chat, name="yj64-llm-chat-broadcast", daemon=True).start()
+        Thread(target=loop,name="yj64-common-chat-dialogue",daemon=True).start()
 
     def _copy_to_clipboard(self, text: str) -> None:
         try:
