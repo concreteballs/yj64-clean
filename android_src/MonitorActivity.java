@@ -54,7 +54,15 @@ public class MonitorActivity extends Activity {
         title.setText("YJ-64 Internal Monitor");
         title.setTextSize(24);
         root.addView(title, new LinearLayout.LayoutParams(-1, 80));
-
+        Button returnToChat = new Button(this);
+        returnToChat.setText("RETURN TO COMMON CHAT");
+        returnToChat.setOnClickListener(v -> {
+            append("monitor_return_to_common_chat_requested", identityJson());
+            Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
+            if (launch != null) { launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT); startActivity(launch); }
+            else Toast.makeText(this, "Base app launcher activity was not found", Toast.LENGTH_LONG).show();
+        });
+        root.addView(returnToChat);
         status = new TextView(this);
         status.setText(identityText());
         status.setTextIsSelectable(true);
