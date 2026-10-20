@@ -1157,7 +1157,7 @@ class YJ64BaseApp(App):
                     if session!=self._chat_session_id or not self.message_distributor.dialogue_enabled:return
                     n=t["participant"]
                     try:
-                        r=self.message_distributor.dispatch_message(self.user_data_dir,n,prompt,mode=t["mode"],history=hist[n],report=lambda event,_n=n,**d:self._append_report("llm_chat_"+event,participant=_n,**d))
+                        r=self.message_distributor.dispatch_message(self.user_data_dir,n,prompt,mode=t["mode"],history=hist[n],report=lambda event,_n=n,**d:self._append_report("llm_chat_"+event,**{"participant":_n,**d}))
                         answer=str(r["response"])
                     except Exception as ex:
                         failed+=1;answer=f"FAILED: {type(ex).__name__}: {ex}";self._append_report("llm_chat_send_failed",participant=n,route_id=t["route_id"],error_type=type(ex).__name__,error=str(ex))
@@ -1173,7 +1173,7 @@ class YJ64BaseApp(App):
                     for x in incoming:hist[n].append({"role":"user","content":f"{x['speaker']}: {x['text']}"});sent[n].add(x["id"])
                     x=incoming[-1];self._append_report("llm_chat_message_forwarded",participant=n,message_ids=[q["id"] for q in incoming],send_count=len(incoming))
                     if session!=self._chat_session_id or not self.message_distributor.dialogue_enabled:break
-                    try:r=self.message_distributor.dispatch_message(self.user_data_dir,n,f"{x['speaker']}: {x['text']}",mode=t["mode"],history=hist[n],report=lambda event,_n=n,**d:self._append_report("llm_chat_"+event,participant=_n,**d));answer=str(r["response"])
+                    try:r=self.message_distributor.dispatch_message(self.user_data_dir,n,f"{x['speaker']}: {x['text']}",mode=t["mode"],history=hist[n],report=lambda event,_n=n,**d:self._append_report("llm_chat_"+event,**{"participant":_n,**d}));answer=str(r["response"])
                     except Exception as ex:
                         failed+=1;self.common_history.append({"role":"assistant","content":f"{n} FAILED: {type(ex).__name__}: {ex}"});self._append_report("llm_chat_send_failed",participant=n,route_id=t["route_id"],error_type=type(ex).__name__,error=str(ex));self._save_common_history();break
                     msgs.append({"id":uuid.uuid4().hex,"speaker":n,"text":answer});sent[n].add(msgs[-1]["id"]);hist[n].append({"role":"assistant","content":f"{n}: {answer}"})
