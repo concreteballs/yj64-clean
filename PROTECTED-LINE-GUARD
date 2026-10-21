@@ -59,161 +59,96 @@ class YJ64BaseApp(App):
         self.private_histories: dict[str, list[dict[str, str]]] = {}
         self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
         self.pid_path = Path(self.user_data_dir) / "yj64-main-process.pid"
-        self.status = Label(
-            text="Starting embedded diagnostic agent...",
-            halign="left",
-            valign="top",
-        )
-        self.status.bind(
-            size=lambda instance, value: setattr(instance, "text_size", value)
-        )
-
-        root = BoxLayout(orientation="vertical", padding=24, spacing=16)
-        root.add_widget(Label(
-            text="YJ-64 Base Application",
-            size_hint_y=None,
-            height=80,
-        ))
-        root.add_widget(self.status)
-
-        monitor_button = Button(
-            text="Open Internal Monitor",
-            size_hint_y=None,
-            height=72,
-        )
-        monitor_button.bind(on_release=self._open_monitor)
-        root.add_widget(monitor_button)
-
-        llm_button = Button(
-            text="Test LLM API + Copy Report",
-            size_hint_y=None,
-            height=72,
-        )
-        llm_button.bind(on_release=self._test_llm_api)
-        root.add_widget(llm_button)
-
-        import_keys_button = Button(
-            text="Import API Keys File",
-            size_hint_y=None,
-            height=72,
-        )
-        import_keys_button.bind(on_release=self._open_monitor)
-        root.add_widget(import_keys_button)
-
-        settings_button = Button(
-            text="Configure LLM API / Key",
-            size_hint_y=None,
-            height=72,
-        )
-        settings_button.bind(on_release=self._open_llm_settings)
-        root.add_widget(settings_button)
-
-        generation_button = Button(
-            text="Test LLM Generation + Copy",
-            size_hint_y=None,
-            height=72,
-        )
-        generation_button.bind(on_release=self._test_llm_generation)
-        root.add_widget(generation_button)
-
-        root.add_widget(Label(
-            text="LLM CHAT",
-            size_hint_y=None,
-            height=42,
-        ))
-        self.chat_output = TextInput(
-            text="The successful generation test will appear here.",
-            readonly=True,
-            multiline=True,
-            size_hint_y=None,
-            height=180,
-        )
-        root.add_widget(self.chat_output)
-
-        chat_row = BoxLayout(
-            spacing=12,
-            size_hint_y=None,
-            height=64,
-        )
-        self.chat_input = TextInput(
-            hint_text="Write a message...",
-            multiline=True,
-            write_tab=False,
-            input_type="text",
-            keyboard_suggestions=True,
-        )
+        Window.clearcolor = (0.025, 0.055, 0.14, 1)
+        self.status = Label(text="Starting embedded diagnostic agent...", size_hint_y=None, height=1, opacity=0)
+        root = BoxLayout(orientation="vertical", padding=(10, 8), spacing=6)
+        header = BoxLayout(orientation="horizontal", size_hint_y=None, height=48, spacing=8)
+        menu_button = Button(text="☰", size_hint_x=None, width=52, background_normal="", background_color=(0.05, 0.18, 0.38, 1))
+        menu_button.bind(on_release=self._open_navigation_menu)
+        header.add_widget(menu_button)
+        header.add_widget(Label(text="YJ-64", halign="left", bold=True, color=(0.82, 0.9, 1, 1), font_size="22sp"))
+        root.add_widget(header)
+        body = BoxLayout(orientation="horizontal", spacing=8)
+        chat_column = BoxLayout(orientation="vertical", spacing=6)
+        chat_column.add_widget(Label(text="ОБЩИЙ ЧАТ", size_hint_y=None, height=30, bold=True, color=(0.65, 0.82, 1, 1)))
+        self.chat_output = TextInput(text="Новый чат. Напишите сообщение ниже.", readonly=True, multiline=True, size_hint_y=1, background_color=(0.055, 0.09, 0.18, 1), foreground_color=(0.9, 0.94, 1, 1), cursor_color=(0.3, 0.65, 1, 1), padding=(10, 10))
+        chat_column.add_widget(self.chat_output)
+        chat_row = BoxLayout(spacing=6, size_hint_y=None, height=104)
+        self.chat_input = TextInput(hint_text="Напишите сообщение...", multiline=True, write_tab=False, input_type="text", keyboard_suggestions=True, size_hint_y=1, background_color=(0.08, 0.13, 0.23, 1), foreground_color=(0.95, 0.97, 1, 1), cursor_color=(0.3, 0.65, 1, 1), padding=(9, 9))
         self.chat_input.bind(focus=self._chat_input_focus_changed)
         chat_row.add_widget(self.chat_input)
-        chat_send = Button(
-            text="SEND",
-            size_hint_x=None,
-            width=120,
-        )
+        chat_send = Button(text="➤", size_hint_x=None, width=58, background_normal="", background_color=(0.04, 0.32, 0.72, 1))
         chat_send.bind(on_release=self._send_llm_chat)
         chat_row.add_widget(chat_send)
-        root.add_widget(chat_row)
-
-        chat_test_button = Button(
-            text="TEST CHAT ROUTE (YJ64_OK)",
-            size_hint_y=None,
-            height=48,
-        )
-        chat_test_button.bind(on_release=self._test_llm_chat_route)
-        root.add_widget(chat_test_button)
-
-        participant_column = BoxLayout(
-            orientation="vertical",
-            spacing=8,
-            size_hint_y=None,
-            height=340,
-        )
-        participant_column.add_widget(Label(
-            text="PARTICIPANTS",
-            size_hint_y=None,
-            height=36,
-        ))
+        chat_column.add_widget(chat_row)
         self.participant_buttons = {}
+        participant_column = BoxLayout(orientation="vertical", spacing=5, size_hint_x=None, width=112)
+        participant_column.add_widget(Label(text="УЧАСТНИКИ", size_hint_y=None, height=34, color=(0.65, 0.82, 1, 1), bold=True))
         for participant_name in ("Participant 1", "Participant 2", "Participant 3"):
-            button = Button(
-                text=participant_name,
-                size_hint_y=None,
-                height=54,
-            )
-            button.bind(
-                on_release=lambda _button, name=participant_name:
-                self._open_participant_menu(name)
-            )
+            button = Button(text=participant_name, size_hint_y=None, height=58, background_normal="", background_color=(0.08, 0.18, 0.32, 1), font_size="12sp")
+            button.bind(on_release=lambda _button, name=participant_name: self._open_participant_menu(name))
             self.participant_buttons[participant_name] = button
             participant_column.add_widget(button)
-        dialogue_button = Button(
-            text="START GROUP DIALOGUE",
-            size_hint_y=None,
-            height=58,
-        )
-        dialogue_button.bind(on_release=self._open_group_dialogue)
-        participant_column.add_widget(dialogue_button)
-        self.mode_button = Button(
-            text="REQUEST MODE: TEXT",
-            size_hint_y=None,
-            height=54,
-        )
+        self.remote_participant_button = Button(text="Удалённый\nучастник", size_hint_y=None, height=58, background_normal="", background_color=(0.08, 0.18, 0.32, 1), font_size="12sp")
+        self.remote_participant_button.bind(on_release=lambda *_: self._open_remote_participant())
+        participant_column.add_widget(self.remote_participant_button)
+        participant_column.add_widget(Label(text="", size_hint_y=1))
+        self.mode_button = Button(text="РЕЖИМ: TEXT", size_hint_y=None, height=58, background_normal="", background_color=(0.08, 0.18, 0.32, 1), font_size="11sp")
         self.mode_button.bind(on_release=self._toggle_request_mode)
         participant_column.add_widget(self.mode_button)
-        root.add_widget(participant_column)
-        self._refresh_participant_buttons()
-
+        body.add_widget(chat_column)
+        body.add_widget(participant_column)
+        root.add_widget(body)
+        bottom = BoxLayout(orientation="horizontal", spacing=6, size_hint_y=None, height=44)
+        for label, callback in (("Настройки LLM", self._open_llm_settings), ("Тест LLM", self._test_llm_api)):
+            button = Button(text=label, background_normal="", background_color=(0.06, 0.16, 0.3, 1), font_size="12sp")
+            button.bind(on_release=callback)
+            bottom.add_widget(button)
+        root.add_widget(bottom)
         self._write_main_pid()
-        self._append_report(
-            "base_ui_ready",
-            pid=os.getpid(),
-            process_name=self._process_name(),
-        )
-
+        self._append_report("base_ui_ready", pid=os.getpid(), process_name=self._process_name())
         Clock.schedule_once(self._ensure_service_started, 0.5)
         Clock.schedule_interval(self._refresh_status, 1.0)
         Clock.schedule_interval(self._refresh_participant_buttons, 1.0)
         Clock.schedule_interval(self._poll_test_command, 0.5)
         return root
+
+    def _open_navigation_menu(self, *_: Any) -> None:
+        content = BoxLayout(orientation="vertical", spacing=8, padding=12)
+        popup = Popup(title="МЕНЮ YJ-64", content=content, size_hint=(0.88, 0.62), auto_dismiss=True)
+        for title, callback in (("Инструменты / монитор", self._open_monitor), ("Новый чат", self._new_chat), ("Общий файл навыков", self._open_global_skills)):
+            button = Button(text=title, size_hint_y=None, height=54, background_normal="", background_color=(0.05, 0.2, 0.42, 1))
+            button.bind(on_release=lambda _btn, cb=callback: (popup.dismiss(), cb()))
+            content.add_widget(button)
+        close = Button(text="Закрыть", size_hint_y=None, height=46)
+        close.bind(on_release=popup.dismiss)
+        content.add_widget(close)
+        popup.open()
+
+    def _new_chat(self, *_: Any) -> None:
+        self.common_history.clear()
+        self.chat_output.text = "Новый чат. Напишите сообщение ниже."
+        self._append_report("new_chat_started")
+
+    def _open_global_skills(self, *_: Any) -> None:
+        content = BoxLayout(orientation="vertical", spacing=8, padding=12)
+        editor = TextInput(text="", hint_text="Общие инструкции и навыки приложения (подготовительный экран)", multiline=True)
+        content.add_widget(editor)
+        content.add_widget(Label(text="Подготовительный экран. Сохранение и применение общих инструкций добавим отдельным этапом.", size_hint_y=None, height=66))
+        popup = Popup(title="ОБЩИЕ НАСТРОЙКИ / НАВЫКИ", content=content, size_hint=(0.92, 0.75))
+        close = Button(text="Закрыть", size_hint_y=None, height=46)
+        close.bind(on_release=popup.dismiss)
+        content.add_widget(close)
+        popup.open()
+
+    def _open_remote_participant(self) -> None:
+        content = BoxLayout(orientation="vertical", spacing=8, padding=12)
+        content.add_widget(Label(text="Удалённый участник\nНастройка подключения"))
+        close = Button(text="Закрыть", size_hint_y=None, height=48)
+        content.add_widget(close)
+        popup = Popup(title="УДАЛЁННЫЙ УЧАСТНИК", content=content, size_hint=(0.9, 0.55))
+        close.bind(on_release=popup.dismiss)
+        popup.open()
 
     def _toggle_request_mode(self, *_: Any) -> None:
         mode = self.message_distributor.toggle_mode()
@@ -2796,7 +2731,7 @@ if __name__ == "__main__":
 
 END ALLOWED
 ============================================================ КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
-EXPECTED-GIT-BLOB-SHA:main.py=dd21519b7af6347f6ef6e91286694d75f06e49eb
+EXPECTED-GIT-BLOB-SHA:main.py=8e8771931f01002bdff8fd11a4315a5120a46e7d
 EXPECTED-GIT-BLOB-SHA:llm_api.py=32571fd86a2e7207257c4ce8742d1d9f0755b115
 EXPECTED-GIT-BLOB-SHA:llm_settings.py=22cef481708a66ce544d395d2e655c3b9022da08
 EXPECTED-GIT-BLOB-SHA:android_src/MonitorActivity.java=74f654c38ca98c51906586a334b501ae2bb56a61
